@@ -37,7 +37,7 @@ pub fn parse_recipe_html(html: &str, source_url: Option<&str>) -> Result<Recipe,
     let selector = Selector::parse(r#"script[type="application/ld+json"]"#).expect("valid selector");
     let node = doc
         .select(&selector)
-        .filter_map(|el| serde_json::from_str::<Value>(&el.text().collect::<String>()).ok())
+        .filter_map(|el| parse_json_ld(&el.text().collect::<String>()))
         .find_map(|v| find_recipe_node(&v).cloned())
         .ok_or(ImportError::NotFound)?;
 
@@ -46,20 +46,49 @@ pub fn parse_recipe_html(html: &str, source_url: Option<&str>) -> Result<Recipe,
     Ok(recipe)
 }
 
-/// Searches a JSON-LD value (object, array, or `@graph`) for a Recipe node.
+/// Parses a JSON-LD block. Many sites put raw line breaks inside strings,
+/// which JSON forbids, so retry with those escaped.
+fn parse_json_ld(s: &str) -> Option<Value> {
+    serde_json::from_str(s).ok().or_else(|| {
+        let (mut fixed, mut in_string, mut escaped) = (String::with_capacity(s.len()), false, false);
+        for ch in s.chars() {
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' if in_string => escaped = true,
+                '"' => in_string = !in_string,
+                '\n' if in_string => {
+                    fixed.push_str("\\n");
+                    continue;
+                }
+                c if in_string && c.is_control() => {
+                    fixed.push(' ');
+                    continue;
+                }
+                _ => {}
+            }
+            fixed.push(ch);
+        }
+        serde_json::from_str(&fixed).ok()
+    })
+}
+
+/// Searches a JSON-LD value (object, array, `@graph` or `mainEntity`) for a
+/// Recipe node.
 fn find_recipe_node(v: &Value) -> Option<&Value> {
+    // "Recipe", "schema:Recipe" or "https://schema.org/Recipe".
+    let recipe_type = |t: &Value| t.as_str().is_some_and(|t| t.rsplit(['/', '#', ':']).next() == Some("Recipe"));
     match v {
         Value::Array(items) => items.iter().find_map(find_recipe_node),
         Value::Object(obj) => {
             let is_recipe = match obj.get("@type") {
-                Some(Value::String(t)) => t == "Recipe",
-                Some(Value::Array(ts)) => ts.iter().any(|t| t == "Recipe"),
-                _ => false,
+                Some(Value::Array(ts)) => ts.iter().any(recipe_type),
+                Some(t) => recipe_type(t),
+                None => false,
             };
             if is_recipe {
                 return Some(v);
             }
-            obj.get("@graph").and_then(find_recipe_node)
+            ["@graph", "mainEntity"].iter().find_map(|k| obj.get(*k).and_then(find_recipe_node))
         }
         _ => None,
     }
@@ -71,7 +100,7 @@ fn recipe_from_json_ld(node: &Value) -> Recipe {
     r.image_url = image(node.get("image"));
     r.author = author(node.get("author"));
     r.yield_text = recipe_yield(node.get("recipeYield"));
-    r.servings = r.yield_text.as_deref().and_then(leading_number);
+    r.servings = r.yield_text.as_deref().and_then(first_number);
     r.prep_minutes = node.get("prepTime").and_then(Value::as_str).and_then(parse_iso_duration);
     r.cook_minutes = node.get("cookTime").and_then(Value::as_str).and_then(parse_iso_duration);
     r.total_minutes = node.get("totalTime").and_then(Value::as_str).and_then(parse_iso_duration);
@@ -99,13 +128,33 @@ fn recipe_from_json_ld(node: &Value) -> Recipe {
 
 /// Cleans text from JSON-LD, which is often HTML-escaped and may contain tags.
 fn clean(s: &str) -> String {
+    collapse(&html_text(s))
+}
+
+fn collapse(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Decodes entities and strips tags, putting a line break at each block
+/// element so "<li>Mix.</li><li>Bake.</li>" doesn't run together.
+fn html_text(s: &str) -> String {
+    const BLOCKS: &[&str] = &["br", "p", "div", "li", "ol", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "tr"];
     let decoded = html_escape::decode_html_entities(s);
-    let stripped = if decoded.contains('<') {
-        Html::parse_fragment(&decoded).root_element().text().collect::<String>()
-    } else {
-        decoded.into_owned()
-    };
-    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
+    if !decoded.contains('<') {
+        return decoded.into_owned();
+    }
+    let mut marked = String::with_capacity(decoded.len() + 16);
+    for (i, part) in decoded.split('<').enumerate() {
+        if i > 0 {
+            let name: String = part.trim_start_matches('/').chars().take_while(char::is_ascii_alphanumeric).collect();
+            if BLOCKS.contains(&name.to_ascii_lowercase().as_str()) {
+                marked.push('\n');
+            }
+            marked.push('<');
+        }
+        marked.push_str(part);
+    }
+    Html::parse_fragment(&marked).root_element().text().collect()
 }
 
 fn text(v: Option<&Value>) -> Option<String> {
@@ -158,9 +207,8 @@ fn recipe_yield(v: Option<&Value>) -> Option<String> {
 fn instructions(v: Option<&Value>) -> Vec<String> {
     match v {
         Some(Value::String(s)) => {
-            // A single blob: split on line breaks.
-            let decoded = html_escape::decode_html_entities(s).replace("<br>", "\n");
-            decoded.lines().map(clean).filter(|l| !l.is_empty()).collect()
+            // A single blob: one step per line or block element.
+            html_text(s).lines().map(collapse).filter(|l| !l.is_empty()).collect()
         }
         Some(Value::Array(items)) => items.iter().flat_map(|i| instructions(Some(i))).collect(),
         Some(Value::Object(obj)) => {
@@ -175,14 +223,17 @@ fn instructions(v: Option<&Value>) -> Vec<String> {
     }
 }
 
-fn leading_number(s: &str) -> Option<u32> {
-    let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
+/// The first whole number in `s`, as in "4 servings" or "Serves 4".
+fn first_number(s: &str) -> Option<u32> {
+    let digits: String = s.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
     digits.parse().ok().filter(|n| *n > 0)
 }
 
 /// Parses ISO 8601 durations such as "PT1H30M" or "P0DT45M" into minutes.
+/// Years and months are taken as 365 and 30 days.
 pub fn parse_iso_duration(s: &str) -> Option<u32> {
-    let s = s.trim().strip_prefix('P')?;
+    let s = s.trim().to_ascii_uppercase();
+    let s = s.strip_prefix('P')?;
     let mut minutes = 0.0;
     let mut num = String::new();
     let mut in_time = false;
@@ -193,8 +244,12 @@ pub fn parse_iso_duration(s: &str) -> Option<u32> {
             _ => {
                 let n: f64 = num.parse().ok()?;
                 num.clear();
+                const DAY: f64 = 24.0 * 60.0;
                 minutes += match (ch, in_time) {
-                    ('D', false) => n * 24.0 * 60.0,
+                    ('Y', false) => n * 365.0 * DAY,
+                    ('M', false) => n * 30.0 * DAY,
+                    ('W', false) => n * 7.0 * DAY,
+                    ('D', false) => n * DAY,
                     ('H', true) => n * 60.0,
                     ('M', true) => n,
                     ('S', true) => n / 60.0,
@@ -263,10 +318,42 @@ mod tests {
     }
 
     #[test]
+    fn html_instructions_split_on_block_elements() {
+        for html in ["<ol><li>Mix.</li><li>Bake.</li></ol>", "Mix.<br/>Bake.", "<p>Mix.</p><p>Bake.</p>", "Mix.<BR>Bake."] {
+            assert_eq!(instructions(Some(&serde_json::json!(html))), vec!["Mix.", "Bake."], "{html}");
+        }
+        assert_eq!(clean("<p>One.</p><p>Two.</p>"), "One. Two.");
+        assert_eq!(clean("Creamy and <b>easy</b>."), "Creamy and easy.");
+    }
+
+    #[test]
+    fn finds_recipe_in_main_entity_with_iri_type() {
+        let page = r#"<script type="application/ld+json">
+            {"@type":"WebPage","mainEntity":{"@type":"http://schema.org/Recipe","name":"Toast",
+             "recipeInstructions":"Toast the bread.
+Butter it."}}
+            </script>"#;
+        let r = parse_recipe_html(page, None).unwrap();
+        assert_eq!(r.title, "Toast");
+        assert_eq!(r.steps, vec!["Toast the bread.", "Butter it."]);
+    }
+
+    #[test]
+    fn servings_from_first_number() {
+        assert_eq!(first_number("Serves 4"), Some(4));
+        assert_eq!(first_number("4 servings"), Some(4));
+        assert_eq!(first_number("a few"), None);
+    }
+
+    #[test]
     fn durations() {
         assert_eq!(parse_iso_duration("PT45M"), Some(45));
         assert_eq!(parse_iso_duration("PT2H"), Some(120));
         assert_eq!(parse_iso_duration("P1D"), Some(1440));
+        assert_eq!(parse_iso_duration("P0Y0M0DT0H35M0.000S"), Some(35));
+        assert_eq!(parse_iso_duration("pt30m"), Some(30));
+        assert_eq!(parse_iso_duration("P1W"), Some(7 * 1440));
+        assert_eq!(parse_iso_duration("P1M"), Some(30 * 1440), "a month, not a minute");
         assert_eq!(parse_iso_duration("garbage"), None);
     }
 }
