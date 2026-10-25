@@ -8,10 +8,13 @@ use crate::{Route, use_data, use_usage, wake};
 /// `servings` carries the scaler value from the detail page (0 = as written).
 #[component]
 pub fn CookMode(id: Uuid, servings: u32) -> Element {
-    let data = use_data();
+    let mut data = use_data();
     let mut usage = use_usage();
     let mut step = use_signal(|| 0usize);
     let mut show_ingredients = use_signal(|| false);
+    // Set once "Done" is pressed: offer a cooking log note before leaving.
+    let mut finished = use_signal(|| false);
+    let mut note_text = use_signal(String::new);
 
     use_hook(move || {
         wake::keep_awake(true);
@@ -59,7 +62,34 @@ pub fn CookMode(id: Uuid, servings: u32) -> Element {
                     }
                 }
             }
-            if total == 0 {
+            if finished() {
+                section { class: "cook-finish",
+                    h2 { "How did it go?" }
+                    p { class: "meta", "Add a note to the cooking log, or skip." }
+                    textarea {
+                        rows: "3",
+                        placeholder: "Used 2 tsp salt; bake 5 min less next time",
+                        "aria-label": "Cooking log note",
+                        value: "{note_text}",
+                        oninput: move |e| note_text.set(e.value()),
+                    }
+                    div { class: "cook-nav",
+                        button { onclick: move |_| { navigator().replace(Route::RecipeDetail { id }); }, "Skip" }
+                        button {
+                            class: "primary",
+                            disabled: note_text.read().trim().is_empty(),
+                            onclick: move |_| {
+                                let text = note_text();
+                                if let Some(r) = data.write().recipes.iter_mut().find(|r| r.id == id) {
+                                    r.add_note(&text);
+                                }
+                                navigator().replace(Route::RecipeDetail { id });
+                            },
+                            "Save note"
+                        }
+                    }
+                }
+            } else if total == 0 {
                 p { class: "empty", "This recipe has no steps yet. Add some with Edit." }
             } else {
                 div { class: "progress",
@@ -85,7 +115,7 @@ pub fn CookMode(id: Uuid, servings: u32) -> Element {
                             class: "primary",
                             onclick: move |_| {
                                 usage.write().record(Event::CookFinished);
-                                navigator().replace(Route::RecipeDetail { id });
+                                finished.set(true);
                             },
                             "Done"
                         }

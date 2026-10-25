@@ -233,6 +233,17 @@ button.danger:hover { background: var(--honey-wash); }
 .tag { padding: 3px 12px; border-radius: 999px; background: var(--honey-wash); font-size: 0.85rem; }
 .notes { white-space: pre-wrap; max-width: 65ch; }
 .recipe .danger { margin-top: 40px; }
+.cooking-log { max-width: 65ch; }
+.cooking-log h2 { margin-bottom: 4px; }
+.log-add { display: flex; gap: 8px; align-items: flex-end; margin: 12px 0 8px; }
+.log li {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--line);
+}
+.log li:last-child { border-bottom: none; }
+.log time { display: block; margin-bottom: 2px; }
+.log .notes { margin: 0; }
+.log button.quiet { padding: 4px 10px; }
 
 /* Groceries */
 .groceries { max-width: 560px; margin-top: 20px; }
@@ -282,6 +293,9 @@ button.danger:hover { background: var(--honey-wash); }
 }
 .cook-nav { display: flex; gap: 12px; }
 .cook-nav button { flex: 1; padding: 18px; font-size: 1.1rem; border-radius: 14px; }
+.cook-finish { margin-top: 28px; max-width: 560px; }
+.cook-finish h2 { margin-top: 0; }
+.cook-finish textarea { margin-bottom: 16px; }
 
 /* Settings */
 .settings { max-width: 560px; }

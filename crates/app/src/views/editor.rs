@@ -116,6 +116,7 @@ fn RecipeEditor(id: Option<Uuid>) -> Element {
             }
             Field {
                 label: "Notes",
+                hint: "Tips that always apply. Notes from each cook go in the cooking log on the recipe page.",
                 value: draft.read().notes.clone(),
                 oninput: move |v| draft.write().notes = v,
                 rows: 3,
