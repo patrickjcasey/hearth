@@ -65,6 +65,7 @@ pub fn use_photo_cache(library: Rc<RefCell<Library>>, data: Signal<AppData>) {
 
     // Each photo is tried once per launch, so a dead link doesn't loop.
     let attempted: Rc<RefCell<HashSet<String>>> = use_hook(Default::default);
+    let recipes_dir = library.borrow().recipes_dir();
     use_effect(move || {
         let wanted: Vec<(Uuid, String, String)> = data
             .read()
@@ -73,7 +74,15 @@ pub fn use_photo_cache(library: Rc<RefCell<Library>>, data: Signal<AppData>) {
             .filter_map(|r| r.image_url.as_deref().map(|url| (r.id, photo_stem(r.id, url), url.to_owned())))
             .collect();
         for (id, stem, url) in wanted {
-            if photos.peek().contains(&stem) || !attempted.borrow_mut().insert(stem.clone()) {
+            if photos.peek().contains(&stem) {
+                // Saving the library prunes photos of old links, so a link
+                // changed A -> B -> A has lost A's file: fetch it again.
+                if photo_path(&recipes_dir, &stem).exists() {
+                    continue;
+                }
+                photos.write().remove(&stem);
+                attempted.borrow_mut().insert(stem.clone());
+            } else if !attempted.borrow_mut().insert(stem.clone()) {
                 continue;
             }
             let library = library.clone();

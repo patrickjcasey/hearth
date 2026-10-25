@@ -1,3 +1,4 @@
+use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use hestia_core::Event;
@@ -23,21 +24,29 @@ pub fn Home() -> Element {
         }
         importing.set(true);
         error.set(None);
-        spawn(async move {
-            match hestia_core::fetch_recipe(&target).await {
+        let nav = navigator();
+        // Not tied to this screen, so switching tabs doesn't cancel the import.
+        spawn_forever(async move {
+            let result = hestia_core::fetch_recipe(&target).await;
+            // This screen's signals are gone if the user left; the library isn't.
+            let still_here = importing.try_write().map(|mut i| *i = false).is_ok();
+            match result {
                 Ok(recipe) => {
                     usage.write().record(Event::RecipeImported);
                     let id = recipe.id;
                     data.write().recipes.insert(0, recipe);
-                    url.set(String::new());
-                    navigator().push(Route::RecipeDetail { id });
+                    if still_here {
+                        url.set(String::new());
+                        nav.push(Route::RecipeDetail { id });
+                    }
                 }
                 Err(e) => {
                     usage.write().record(Event::ImportFailed);
-                    error.set(Some(e.to_string()));
+                    if let Ok(mut error) = error.try_write() {
+                        *error = Some(e.to_string());
+                    }
                 }
             }
-            importing.set(false);
         });
     };
 
