@@ -22,3 +22,6 @@ reqwest = { workspace = true, optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
 scraper = "0.27"
 html-escape = "0.2"
+
+[dev-dependencies]
+tokio.workspace = true
