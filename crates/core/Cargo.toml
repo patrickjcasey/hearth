@@ -1,0 +1,24 @@
+[package]
+name = "hestia-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enables fetching recipe pages over HTTP. Off for targets that can't make
+# arbitrary cross-origin requests (e.g. the browser).
+fetch = ["dep:reqwest"]
+# Enables decoding and shrinking recipe photos for local storage.
+photos = ["dep:image"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+reqwest = { workspace = true, optional = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
+scraper = "0.27"
+html-escape = "0.2"

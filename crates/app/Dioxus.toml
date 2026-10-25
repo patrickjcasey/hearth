@@ -1,0 +1,6 @@
+[application]
+name = "Hestia"
+
+[bundle]
+identifier = "app.hestia.recipes"
+publisher = "Hestia"

@@ -1,0 +1,30 @@
+[package]
+name = "hestia-app"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+hestia-core = { workspace = true, features = ["fetch", "photos"] }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+dioxus = { version = "0.7", features = ["router"] }
+dirs = "6"
+
+[features]
+default = ["desktop"]
+desktop = ["dioxus/desktop"]
+mobile = ["dioxus/mobile"]
+
+# Keeping the screen awake in cook mode needs the native platform APIs.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+objc2-ui-kit = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
