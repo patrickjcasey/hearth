@@ -79,7 +79,9 @@ fn normalize_fractions(s: &str) -> String {
     for ch in s.chars() {
         let rep = match ch {
             '½' => " 1/2", '⅓' => " 1/3", '⅔' => " 2/3", '¼' => " 1/4", '¾' => " 3/4",
-            '⅕' => " 1/5", '⅛' => " 1/8", '⅜' => " 3/8", '⅝' => " 5/8", '⅞' => " 7/8",
+            '⅕' => " 1/5", '⅖' => " 2/5", '⅗' => " 3/5", '⅘' => " 4/5", '⅙' => " 1/6", '⅚' => " 5/6",
+            '⅐' => " 1/7", '⅛' => " 1/8", '⅜' => " 3/8", '⅝' => " 5/8", '⅞' => " 7/8", '⅑' => " 1/9",
+            '⅒' => " 1/10",
             '⁄' => "/",
             _ => {
                 out.push(ch);
@@ -91,12 +93,20 @@ fn normalize_fractions(s: &str) -> String {
     out.trim().to_string()
 }
 
-/// Reads one number token ("2", "1.5", "1/2") from the start of `s`.
+/// Reads one number token ("2", "1.5", "1,5", "1/2") from the start of `s`.
 /// Returns the value, whether it was a fraction, and the remainder.
 fn take_number(s: &str) -> Option<(f64, bool, &str)> {
     let s = s.trim_start();
-    let end = s.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '/')).unwrap_or(s.len());
-    let tok = &s[..end];
+    let mut end = s.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '/')).unwrap_or(s.len());
+    let mut tok = s[..end].to_string();
+    // A decimal comma, as in "1,5 kg". Not "1, 2" or "1,000".
+    if let Some(after) = s[end..].strip_prefix(',') {
+        let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+        if (1..=2).contains(&digits) && !tok.is_empty() && tok.bytes().all(|b| b.is_ascii_digit()) {
+            tok = format!("{tok}.{}", &after[..digits]);
+            end += 1 + digits;
+        }
+    }
     let value = match tok.split_once('/') {
         Some((n, d)) => {
             let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
@@ -124,9 +134,15 @@ fn parse_quantity(s: &str) -> (Option<Quantity>, &str) {
         return (None, s);
     };
     let after = rest.trim_start();
-    let sep = ["-", "–", "to "].iter().find_map(|sep| after.strip_prefix(sep));
-    if let Some((upper, rest)) = sep.and_then(take_mixed) {
-        return (Some(Quantity { amount, upper: Some(upper) }), rest);
+    let sep = ["-", "–", "to "].iter().find_map(|sep| after.strip_prefix(sep).map(|r| (*sep, r)));
+    if let Some((sep, (upper, after))) = sep.and_then(|(sep, r)| Some((sep, take_mixed(r)?))) {
+        if upper > amount {
+            return (Some(Quantity { amount, upper: Some(upper) }), after);
+        }
+        // "1-1/2 cups" is one and a half, not a range down to a half.
+        if sep == "-" && amount.fract() == 0.0 && upper < 1.0 {
+            return (Some(Quantity { amount: amount + upper, upper: None }), after);
+        }
     }
     (Some(Quantity { amount, upper: None }), rest)
 }
@@ -139,7 +155,10 @@ fn parse_unit(rest: &str) -> (Option<&str>, &str) {
         let case_sensitive = unit.len() == 1;
         let Some(head) = rest.get(..unit.len()) else { continue };
         let hit = if case_sensitive { head == *unit } else { head.eq_ignore_ascii_case(unit) };
-        let boundary = rest[unit.len()..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        // One-letter units need a clear end, so "T-bone" isn't a tablespoon.
+        let boundary = rest[unit.len()..].chars().next().is_none_or(|c| {
+            if case_sensitive { c.is_whitespace() || c == '.' || c == ')' } else { !c.is_alphanumeric() }
+        });
         if hit && boundary && best.is_none_or(|b| unit.len() > b.len()) {
             best = Some(unit);
         }
@@ -159,6 +178,18 @@ pub fn format_amount(v: f64) -> String {
         (0.125, "1/8"), (0.25, "1/4"), (1.0 / 3.0, "1/3"), (0.375, "3/8"), (0.5, "1/2"),
         (0.625, "5/8"), (2.0 / 3.0, "2/3"), (0.75, "3/4"), (0.875, "7/8"),
     ];
+    let decimal = |places: usize| {
+        let s = format!("{v:.places$}");
+        if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+    };
+    // Too small for a kitchen fraction: one significant digit, not "0".
+    if v > 0.0 && v < 0.1 {
+        return decimal((-v.log10()).ceil() as usize);
+    }
+    // Beyond whole-number precision (and i64), plain digits.
+    if !v.is_finite() || v.abs() >= 1e15 {
+        return decimal(0);
+    }
     let whole = v.trunc();
     let frac = v - whole;
     if frac < 0.04 {
@@ -167,11 +198,11 @@ pub fn format_amount(v: f64) -> String {
     if frac > 0.96 {
         return format!("{}", whole as i64 + 1);
     }
-    if let Some((_, f)) = FRACTIONS.iter().find(|(x, _)| (frac - x).abs() < 0.04) {
+    let nearest = FRACTIONS.iter().min_by(|(a, _), (b, _)| (frac - a).abs().total_cmp(&(frac - b).abs()));
+    if let Some((_, f)) = nearest.filter(|(x, _)| (frac - x).abs() < 0.04) {
         return if whole == 0.0 { f.to_string() } else { format!("{} {f}", whole as i64) };
     }
-    let s = format!("{v:.2}");
-    s.trim_end_matches('0').trim_end_matches('.').to_string()
+    decimal(2)
 }
 
 #[cfg(test)]
@@ -239,5 +270,43 @@ mod tests {
         assert_eq!(format_amount(2.0), "2");
         assert_eq!(format_amount(1.99), "2");
         assert_eq!(format_amount(1.2), "1.2");
+        assert_eq!(format_amount(0.36), "3/8", "nearest fraction, not the first close one");
+        assert_eq!(format_amount(0.03125), "0.03");
+        assert_eq!(format_amount(0.001), "0.001");
+        assert_eq!(format_amount(1e20), "100000000000000000000");
+        assert_eq!(Ingredient::parse("1/4 tsp salt").display_scaled(0.125), "0.03 tsp salt");
+    }
+
+    #[test]
+    fn hyphenated_mixed_number_is_not_a_range() {
+        let i = Ingredient::parse("1-1/2 cups flour");
+        assert_eq!(i.quantity, q(1.5));
+        assert_eq!(i.unit.as_deref(), Some("cups"));
+        assert_eq!(i.display_scaled(2.0), "3 cups flour");
+        assert_eq!(Ingredient::parse("1/2-1 cup milk").quantity, Some(Quantity { amount: 0.5, upper: Some(1.0) }));
+        let i = Ingredient::parse("3-2 eggs");
+        assert_eq!((i.quantity, i.name.as_str()), (q(3.0), "-2 eggs"), "not a range downward");
+    }
+
+    #[test]
+    fn one_letter_units_need_a_clear_end() {
+        let i = Ingredient::parse("4 T-bone steaks");
+        assert_eq!(i.unit, None);
+        assert_eq!(i.display_scaled(2.0), "8 T-bone steaks");
+        assert_eq!(Ingredient::parse("2 c. sugar").unit.as_deref(), Some("c"));
+        assert_eq!(Ingredient::parse("1 T butter").unit.as_deref(), Some("T"));
+        assert_eq!(Ingredient::parse("1 t").unit.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn more_fractions_and_decimal_commas() {
+        assert_eq!(Ingredient::parse("⅙ cup water").quantity, q(1.0 / 6.0));
+        assert_eq!(Ingredient::parse("2⅘ oz").quantity, q(2.8));
+        assert_eq!(Ingredient::parse("⅒ l milk").quantity, q(0.1));
+        let i = Ingredient::parse("1,5 kg potatoes");
+        assert_eq!(i.quantity, q(1.5));
+        assert_eq!((i.unit.as_deref(), i.name.as_str()), (Some("kg"), "potatoes"));
+        assert_eq!(Ingredient::parse("0,25 l cream").quantity, q(0.25));
+        assert_eq!(Ingredient::parse("2, 3 eggs").quantity, q(2.0));
     }
 }
