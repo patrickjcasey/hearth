@@ -13,23 +13,18 @@ pub enum ImportError {
     NotFound,
     #[cfg(feature = "fetch")]
     #[error("could not fetch page: {0}")]
-    Fetch(#[from] reqwest::Error),
+    Fetch(#[from] crate::fetch::FetchError),
 }
+
+/// Recipe pages are rarely over 1 MB; refuse anything far larger.
+#[cfg(feature = "fetch")]
+const MAX_PAGE_BYTES: u64 = 5_000_000;
 
 /// Downloads `url` and extracts the recipe from it.
 #[cfg(feature = "fetch")]
 pub async fn fetch_recipe(url: &str) -> Result<Recipe, ImportError> {
-    let html = reqwest::Client::builder()
-        // Some sites refuse requests without a browser-like user agent.
-        .user_agent("Mozilla/5.0 (compatible; Hestia/0.1; +https://github.com/)")
-        .build()?
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
-    parse_recipe_html(&html, Some(url))
+    let html = crate::fetch::get(url, MAX_PAGE_BYTES).await?;
+    parse_recipe_html(&String::from_utf8_lossy(&html), Some(url))
 }
 
 pub fn parse_recipe_html(html: &str, source_url: Option<&str>) -> Result<Recipe, ImportError> {

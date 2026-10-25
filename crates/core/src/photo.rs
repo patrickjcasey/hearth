@@ -10,11 +10,18 @@ pub const MAX_SIDE: u32 = 1200;
 
 const JPEG_QUALITY: u8 = 82;
 
+/// Largest download we accept; phone photos are a few MB.
+#[cfg(feature = "fetch")]
+const MAX_PHOTO_BYTES: u64 = 20_000_000;
+/// Decoding limits, so a small file can't claim a huge canvas.
+const MAX_DECODE_SIDE: u32 = 8000;
+const MAX_DECODE_BYTES: u64 = 128 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PhotoError {
     #[cfg(feature = "fetch")]
     #[error("could not download photo: {0}")]
-    Fetch(#[from] reqwest::Error),
+    Fetch(#[from] crate::fetch::FetchError),
     #[error("not an image we can read: {0}")]
     Decode(#[from] image::ImageError),
 }
@@ -41,37 +48,35 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// Downloads the photo at `url`.
 #[cfg(feature = "fetch")]
 pub async fn fetch_photo(url: &str) -> Result<Vec<u8>, PhotoError> {
-    let bytes = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (compatible; Hestia/0.1; +https://github.com/)")
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    Ok(bytes.to_vec())
+    Ok(crate::fetch::get(url, MAX_PHOTO_BYTES).await?)
 }
 
-/// Decodes a photo in any common format, fixes its orientation, fits it
-/// within [`MAX_SIDE`] and re-encodes it as a JPEG. CPU-bound: call it off
-/// the UI thread.
+/// Decodes a photo in any common format, fits it within [`MAX_SIDE`], fixes
+/// its orientation and re-encodes it as a JPEG. CPU-bound: call it off the
+/// UI thread.
 pub fn shrink_photo(bytes: &[u8]) -> Result<Vec<u8>, PhotoError> {
     use image::codecs::jpeg::JpegEncoder;
     use image::imageops::FilterType;
-    use image::{DynamicImage, ImageDecoder, ImageReader};
+    use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 
-    let mut decoder = ImageReader::new(std::io::Cursor::new(bytes))
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    let mut reader = ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(image::ImageError::IoError)?
-        .into_decoder()?;
+        .map_err(image::ImageError::IoError)?;
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder()?;
+    // The decoded pixels count too, as in `ImageReader::decode`.
+    limits.reserve(decoder.total_bytes())?;
     let orientation = decoder.orientation()?;
     let mut photo = DynamicImage::from_decoder(decoder)?;
-    photo.apply_orientation(orientation);
+    // Shrink first, so rotating copies the small image, not the original.
     if photo.width() > MAX_SIDE || photo.height() > MAX_SIDE {
         photo = photo.resize(MAX_SIDE, MAX_SIDE, FilterType::Triangle);
     }
+    photo.apply_orientation(orientation);
 
     let mut out = Vec::new();
     // JPEG has no alpha channel; flatten anything that does.
@@ -111,6 +116,15 @@ mod tests {
     fn leaves_small_photos_alone() {
         let jpeg = shrink_photo(&png(640, 480)).unwrap();
         assert_eq!(size(&jpeg), (640, 480));
+    }
+
+    #[test]
+    fn rejects_huge_canvases() {
+        for (w, h) in [(MAX_DECODE_SIDE + 1, 1), (1, MAX_DECODE_SIDE + 1)] {
+            let err = shrink_photo(&png(w, h)).unwrap_err();
+            assert!(matches!(err, PhotoError::Decode(image::ImageError::Limits(_))), "{w}x{h}: {err}");
+        }
+        assert!(shrink_photo(&png(MAX_DECODE_SIDE, 1)).is_ok());
     }
 
     #[test]

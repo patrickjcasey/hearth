@@ -1,6 +1,8 @@
 //! Platform-independent recipe logic shared by the app and the server.
 
 pub mod draft;
+#[cfg(feature = "fetch")]
+pub mod fetch;
 pub mod import;
 pub mod ingredient;
 pub mod library;
