@@ -2,6 +2,8 @@
 //! Store requires, and an endpoint that receives opt-in usage reports.
 //! Recipes never reach the server; they live on-device and in iCloud.
 
+use std::str::FromStr;
+
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -12,6 +14,7 @@ use axum::{
 use chrono::{Duration, Utc};
 use hestia_core::usage::{ReportError, UsageReport};
 use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode};
 use tower_http::trace::TraceLayer;
 
 #[derive(Clone)]
@@ -23,6 +26,18 @@ pub struct AppState {
 const MAX_REPORT_BYTES: usize = 4 * 1024;
 /// The app reports at most daily, so more often than this is a retry loop or abuse.
 const MIN_REPORT_INTERVAL: Duration = Duration::hours(1);
+
+/// Opens the database and applies migrations. WAL lets readers run beside
+/// the writer, and writers queue for up to the busy timeout.
+pub async fn connect(url: &str) -> Result<SqlitePool, sqlx::Error> {
+    let options = SqliteConnectOptions::from_str(url)?
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(10));
+    let db = SqlitePool::connect_with(options).await?;
+    sqlx::migrate!().run(&db).await?;
+    Ok(db)
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -98,13 +113,17 @@ async fn receive_report(
 ) -> Result<StatusCode, ApiError> {
     report.validate()?;
     let install_id = report.install_id.to_string();
+    // SQLite's own datetime format, so `datetime('now', ...)` compares correctly.
+    let fmt = |t: chrono::DateTime<Utc>| t.format("%Y-%m-%d %H:%M:%S").to_string();
     let now = Utc::now();
 
-    let mut tx = s.db.begin().await?;
+    // IMMEDIATE takes the write lock up front. A deferred transaction would
+    // read, then fail with SQLITE_BUSY when another request also wants to write.
+    let mut tx = s.db.begin_with("BEGIN IMMEDIATE").await?;
     let recent: Option<(i64,)> =
         sqlx::query_as("SELECT 1 FROM usage_events WHERE install_id = ? AND received_at > ? LIMIT 1")
             .bind(&install_id)
-            .bind((now - MIN_REPORT_INTERVAL).to_rfc3339())
+            .bind(fmt(now - MIN_REPORT_INTERVAL))
             .fetch_optional(&mut *tx)
             .await?;
     if recent.is_some() {
@@ -120,7 +139,7 @@ async fn receive_report(
         .bind(&report.platform)
         .bind(event.as_str())
         .bind(*count as i64)
-        .bind(now.to_rfc3339())
+        .bind(fmt(now))
         .execute(&mut *tx)
         .await?;
     }
@@ -191,11 +210,53 @@ mod tests {
         let totals: Vec<(String, i64)> =
             sqlx::query_as("SELECT event, count FROM usage_events ORDER BY event").fetch_all(&db).await.unwrap();
         assert_eq!(totals, [("cook_started".into(), 2), ("recipe_imported".into(), 5)]);
+        // Stored in SQLite's own format, so the README's datetime() query works.
+        let (sqlite_format,): (bool,) =
+            sqlx::query_as("SELECT received_at = datetime(received_at) FROM usage_events").fetch_one(&db).await.unwrap();
+        assert!(sqlite_format);
 
         assert_eq!(status(&app, post_json(body)).await, StatusCode::TOO_MANY_REQUESTS);
         // A different install is unaffected.
         let other = serde_json::to_vec(&report()).unwrap();
         assert_eq!(status(&app, post_json(other)).await, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn migration_converts_rfc3339_timestamps() {
+        let (_, db) = app().await;
+        sqlx::query(
+            "INSERT INTO usage_events (install_id, app_version, platform, event, count, received_at)
+             VALUES ('x', '0.1.0', 'ios', 'app_launched', 1, '2026-01-02T23:04:05.123456789-02:00')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0002_sqlite_timestamps.sql")).execute(&db).await.unwrap();
+        let (at,): (String,) = sqlx::query_as("SELECT received_at FROM usage_events").fetch_one(&db).await.unwrap();
+        assert_eq!(at, "2026-01-03 01:04:05");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_reports_all_succeed() {
+        // A file, not :memory:, so connections really contend for the lock.
+        let path = std::env::temp_dir().join(format!("hestia-test-{}.db", Uuid::new_v4()));
+        let db = connect(&format!("sqlite://{}", path.display())).await.unwrap();
+        let app = router(AppState { db: db.clone() });
+        let tasks: Vec<_> = (0..30)
+            .map(|_| {
+                let (app, body) = (app.clone(), serde_json::to_vec(&report()).unwrap());
+                tokio::spawn(async move { status(&app, post_json(body)).await })
+            })
+            .collect();
+        for t in tasks {
+            assert_eq!(t.await.unwrap(), StatusCode::NO_CONTENT);
+        }
+        let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM usage_events").fetch_one(&db).await.unwrap();
+        assert_eq!(n, 60);
+        db.close().await;
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
     }
 
     #[tokio::test]
