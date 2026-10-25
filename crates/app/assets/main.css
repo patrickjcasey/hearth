@@ -287,6 +287,8 @@ button.danger:hover { background: var(--honey-wash); }
 .settings { max-width: 560px; }
 .settings-group { margin-bottom: 36px; }
 .settings-group h2 { margin-top: 0; }
+.backup-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.backup-actions .button { cursor: pointer; }
 .settings-group h3 { font-family: var(--sans); font-size: 0.9rem; font-weight: 600; margin: 20px 0 6px; }
 .toggle-row {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;

@@ -49,10 +49,17 @@ fn main() {
 #[component]
 fn App() -> Element {
     let (library, data) = use_hook(|| {
-        let (library, data) = Library::open(store::app_dir());
+        let dir = store::app_dir();
+        // Before opening, so the copy predates any tidying up open does.
+        let today = chrono::Local::now().date_naive();
+        if let Err(e) = store::snapshot(&dir, &dir.join("backups"), today) {
+            eprintln!("failed to back up the library: {e}");
+        }
+        let (library, data) = Library::open(dir);
         (Rc::new(RefCell::new(library)), data)
     });
     let data = use_context_provider(|| Signal::new(data));
+    use_context_provider(|| library.clone());
     // Persist whenever the library changes.
     let saver = library.clone();
     use_effect(move || saver.borrow_mut().save(&data.read()));
@@ -137,6 +144,10 @@ pub fn use_data() -> Signal<AppData> {
 }
 
 pub fn use_usage() -> Signal<Usage> {
+    use_context()
+}
+
+pub fn use_library() -> Rc<RefCell<Library>> {
     use_context()
 }
 
