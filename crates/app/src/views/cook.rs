@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::{Route, use_data, use_usage, wake};
 
-/// Full-screen, one-step-at-a-time view. The screen stays awake while it's open.
+/// Full-screen, one-step-at-a-time view. The screen always stays awake here.
 /// `servings` carries the scaler value from the detail page (0 = as written).
 #[component]
 pub fn CookMode(id: Uuid, servings: u32) -> Element {
@@ -13,11 +13,9 @@ pub fn CookMode(id: Uuid, servings: u32) -> Element {
     let mut step = use_signal(|| 0usize);
     let mut show_ingredients = use_signal(|| false);
 
-    use_hook(move || {
-        wake::keep_awake(true);
-        usage.write().record(Event::CookStarted);
-    });
-    use_drop(|| wake::keep_awake(false));
+    // Awake here regardless of the "Keep screen awake" setting.
+    wake::use_keep_awake(|| true);
+    use_hook(move || usage.write().record(Event::CookStarted));
 
     let data_ref = data.read();
     let Some(recipe) = data_ref.recipe(id) else {

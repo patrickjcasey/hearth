@@ -3,6 +3,7 @@
 
 mod analytics;
 mod photos;
+mod prefs;
 mod store;
 mod views;
 mod wake;
@@ -66,6 +67,9 @@ fn App() -> Element {
             analytics::upload_if_due(usage).await;
         })
     });
+
+    let prefs = use_context_provider(|| Signal::new(store::read_json::<prefs::Prefs>(prefs::FILE)));
+    use_effect(move || store::write_json(prefs::FILE, &*prefs.read()));
 
     rsx! {
         style { {CSS} }

@@ -3,12 +3,16 @@ use hestia_core::{Event, GroceryItem};
 use uuid::Uuid;
 
 use crate::photos::use_photo;
-use crate::{Route, use_data, use_usage};
+use crate::prefs::use_prefs;
+use crate::{Route, use_data, use_usage, wake};
 
 #[component]
 pub fn RecipeDetail(id: Uuid) -> Element {
     let mut data = use_data();
     let mut usage = use_usage();
+    let mut prefs = use_prefs();
+    wake::use_keep_awake(move || prefs.read().keep_awake);
+    let keep_awake = prefs.read().keep_awake;
     let base_servings = data.read().recipe(id).and_then(|r| r.servings);
     let mut servings = use_signal(|| base_servings.unwrap_or(1));
     let mut added = use_signal(|| false);
@@ -72,6 +76,12 @@ pub fn RecipeDetail(id: Uuid) -> Element {
                 Link { to: Route::EditRecipe { id }, class: "button", "Edit" }
                 button { onclick: toggle_favorite,
                     if recipe.favorite { "★ Favorited" } else { "☆ Favorite" }
+                }
+                button {
+                    "aria-pressed": "{keep_awake}",
+                    title: "Keep screen awake while cooking",
+                    onclick: move |_| prefs.with_mut(|p| p.keep_awake = !p.keep_awake),
+                    if keep_awake { "Screen: stays awake" } else { "Screen: may sleep" }
                 }
                 button { onclick: add_to_groceries, disabled: added(),
                     if added() { "Added to groceries" } else { "Add to groceries" }

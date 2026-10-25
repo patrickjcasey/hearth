@@ -14,7 +14,9 @@ crates/
   app/     hestia-app: Dioxus UI, one codebase for macOS, iOS, (Android)
            - Local-first: data lives in a JSON file on the device
            - Imports recipes directly from the device; no server required
-           - Cook mode keeps the screen awake (see src/wake.rs):
+           - Cook mode keeps the screen awake; the "Keep screen awake"
+             setting extends this to the recipe page (per-device
+             settings.json, never synced). See src/wake.rs:
              iOS idleTimerDisabled, macOS NSProcessInfo activity,
              Android TODO
            - Opt-in usage statistics (src/analytics.rs), see below

@@ -1,16 +1,28 @@
 use dioxus::prelude::*;
 
+use crate::prefs::use_prefs;
 use crate::{analytics, use_usage};
 
 #[component]
 pub fn Settings() -> Element {
     let mut usage = use_usage();
+    let mut prefs = use_prefs();
     let u = usage.read();
     let preview = u.report().map(|r| serde_json::to_string_pretty(&r).expect("report serializes"));
 
     rsx! {
         div { class: "settings",
         h1 { "Settings" }
+
+        section { class: "settings-group",
+            h2 { "Cooking" }
+            Toggle {
+                label: "Keep screen awake while cooking",
+                detail: "The screen stays on while a recipe or cook mode is open.",
+                on: prefs.read().keep_awake,
+                onchange: move |on| prefs.write().keep_awake = on,
+            }
+        }
 
         section { class: "settings-group",
             h2 { "Usage statistics" }
