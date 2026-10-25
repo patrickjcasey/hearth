@@ -1,8 +1,10 @@
 use dioxus::prelude::*;
-use hestia_core::{Event, GroceryItem};
+use hestia_core::share::SHARE_DAYS;
+use hestia_core::{Event, GroceryItem, ShareLink, SharedRecipe};
 use uuid::Uuid;
 
 use crate::photos::use_photo;
+use crate::share;
 use crate::{Route, use_data, use_usage};
 
 #[component]
@@ -15,6 +17,7 @@ pub fn RecipeDetail(id: Uuid) -> Element {
     let image_url = data.read().recipe(id).and_then(|r| r.image_url.clone());
     let hero = use_photo(id, image_url.as_deref()).or(image_url);
     let mut hero_broken = use_signal(|| None::<String>);
+    let mut share_open = use_signal(|| false);
 
     let data_ref = data.read();
     let Some(recipe) = data_ref.recipe(id) else {
@@ -76,9 +79,15 @@ pub fn RecipeDetail(id: Uuid) -> Element {
                 button { onclick: add_to_groceries, disabled: added(),
                     if added() { "Added to groceries" } else { "Add to groceries" }
                 }
+                if share::SHARE_URL.is_some() {
+                    button { onclick: move |_| share_open.toggle(), disabled: share_open(), "Share" }
+                }
                 if let Some(src) = &recipe.source_url {
                     a { href: "{src}", target: "_blank", class: "button", "Original" }
                 }
+            }
+            if share_open() {
+                SharePanel { id, onclose: move |_| share_open.set(false) }
             }
 
             div { class: "recipe-body",
@@ -119,6 +128,87 @@ pub fn RecipeDetail(id: Uuid) -> Element {
                 }
             }
             button { class: "danger", onclick: delete, "Delete recipe" }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum ShareState {
+    Confirm,
+    Sending,
+    Done { link: ShareLink, copied: bool },
+    Failed(String),
+}
+
+/// Asks before uploading anything, then shows the link and copies it.
+#[component]
+fn SharePanel(id: Uuid, onclose: EventHandler) -> Element {
+    let data = use_data();
+    let mut usage = use_usage();
+    let mut state = use_signal(|| ShareState::Confirm);
+    let host = share::host().unwrap_or("the Hestia server");
+
+    let create = move |_| {
+        let Some(recipe) = data.peek().recipe(id).map(SharedRecipe::from) else { return };
+        state.set(ShareState::Sending);
+        spawn(async move {
+            match share::create_link(&recipe).await {
+                Ok(link) => {
+                    usage.write().record(Event::RecipeShared);
+                    let copied = share::copy_to_clipboard(&link.url);
+                    state.set(ShareState::Done { link, copied });
+                }
+                Err(e) => state.set(ShareState::Failed(e)),
+            }
+        });
+    };
+    let copy = move |_| {
+        let ShareState::Done { link, .. } = state() else { return };
+        let ok = share::copy_to_clipboard(&link.url);
+        if let ShareState::Done { copied, .. } = &mut *state.write() {
+            *copied = ok;
+        }
+    };
+    let close = move |_| onclose.call(());
+
+    rsx! {
+        div { class: "share-panel",
+            match state() {
+                ShareState::Confirm => rsx! {
+                    p { "Create a link anyone can open, even without Hestia?" }
+                    p { class: "meta",
+                        "This uploads the title, description, author, servings, times, ingredients, steps, tags, "
+                        "and source and photo links to {host}. Your notes and photos stay on this device. "
+                        "The link shows the recipe as it is now and stops working after {SHARE_DAYS} days."
+                    }
+                    div { class: "actions",
+                        button { class: "primary", onclick: create, "Create link" }
+                        button { class: "quiet", onclick: close, "Cancel" }
+                    }
+                },
+                ShareState::Sending => rsx! { p { class: "meta", "Creating link…" } },
+                ShareState::Done { link, copied } => {
+                    let until = link.expires_at.with_timezone(&chrono::Local).format("%B %-d, %Y").to_string();
+                    rsx! {
+                        div { class: "share-link",
+                            input { readonly: true, value: "{link.url}", "aria-label": "Share link" }
+                            button { onclick: copy, if copied { "Copied" } else { "Copy" } }
+                        }
+                        p { class: "meta",
+                            if copied { "Link copied. " }
+                            "Anyone with it can view and import this recipe until {until}."
+                        }
+                        button { class: "quiet", onclick: close, "Done" }
+                    }
+                }
+                ShareState::Failed(err) => rsx! {
+                    p { class: "error", "{err}" }
+                    div { class: "actions",
+                        button { onclick: create, "Try again" }
+                        button { class: "quiet", onclick: close, "Cancel" }
+                    }
+                },
+            }
         }
     }
 }

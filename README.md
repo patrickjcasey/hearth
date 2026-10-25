@@ -10,7 +10,8 @@ crates/
            - Recipe / GroceryItem / MealPlanEntry models
            - Ingredient parsing + serving scaling ("1 1/2 cups")
            - Recipe import from schema.org JSON-LD (works on most recipe sites)
-           - UsageReport: the only data the app can ever send home
+           - UsageReport: the only data the app sends home on its own
+           - SharedRecipe: what a share link uploads, and its JSON-LD form
   app/     hestia-app: Dioxus UI, one codebase for macOS, iOS, (Android)
            - Local-first: data lives in a JSON file on the device
            - Imports recipes directly from the device; no server required
@@ -18,12 +19,14 @@ crates/
              iOS idleTimerDisabled, macOS NSProcessInfo activity,
              Android TODO
            - Opt-in usage statistics (src/analytics.rs), see below
+           - Share links (src/share.rs), see below
   server/  hestia-server: the website (Axum + SQLite)
            - Landing, privacy and support pages (site/)
            - POST /api/events receives opt-in usage reports
+           - POST /api/share + GET /r/<id>: recipes shared as links
 ```
 
-The app is local-first, so it works offline and costs nothing to run. Recipes never go to the server.
+The app is local-first, so it works offline and costs nothing to run. Recipes stay on the device; the only recipe that ever reaches the server is one the user explicitly shares as a link (see Sharing).
 
 The library is a folder with one file per recipe (`recipes/<id>.json`) plus `groceries.json`, so it can live in a synced folder. A deleted recipe leaves a small tombstone file, so a device that was offline during the delete doesn't bring the recipe back. When two versions of a recipe meet, including conflicting copies left by a sync service, the one with the newest `updated_at` wins (`core/src/library.rs`). Libraries saved in the older single-file format (`data.json`) are moved over automatically the first time the app opens.
 
@@ -48,6 +51,23 @@ Example totals query on the server:
 SELECT event, SUM(count) AS total, COUNT(DISTINCT install_id) AS installs
 FROM usage_events WHERE received_at > datetime('now', '-30 days')
 GROUP BY event ORDER BY total DESC;
+```
+
+## Sharing
+
+A recipe's **Share** button creates a link anyone can open in a browser. Nothing is uploaded until the user confirms **Create link** in the panel, which says what will be sent and where.
+
+- **Sent:** one recipe as `hestia_core::SharedRecipe`: title, description, author, servings, yield, prep/cook/total minutes, ingredient lines, steps, tags, and the source and photo links if they are web links. The server rejects unknown fields.
+- **Not sent:** notes, the favorite flag, ids and timestamps, photo files, other recipes, the usage-statistics id, or anything identifying the device.
+- **Stored:** in the server's `shares` table under a random 10-character id, with the creation and expiry time. Links expire after 90 days, and expired rows are deleted whenever a new share is created. A link is a snapshot, so later edits don't change it.
+- **Served:** `GET /r/<id>` is a readable page with schema.org Recipe JSON-LD embedded, so pasting the link into Hestia's import box (or most other recipe apps) saves a copy. Pages send `noindex`.
+
+When the link is created the app copies it to the clipboard (macOS and iOS; other platforms show it to copy by hand). With usage statistics on, it counts a `recipe_shared` event, never the recipe.
+
+Like the statistics endpoint, the share endpoint is set when the app is built, and builds without it have no Share button:
+
+```sh
+HESTIA_SHARE_URL=https://hestia.example.com/api/share dx bundle --platform ios --release
 ```
 
 ## Development
@@ -97,10 +117,12 @@ TODO: `store.rs` needs to use the app's internal files directory on Android.
 | GET    | `/style.css`  | Stylesheet                                               |
 | GET    | `/health`     | Liveness                                                 |
 | POST   | `/api/events` | Usage report: 204 accepted, 422 invalid, 429 already sent within the last hour, 413 over 4 KB |
+| POST   | `/api/share`  | Share a recipe: 201 `{"url", "expires_at"}`, 422 invalid, 429 over 600 shares in the last hour (all users), 413 over 64 KB |
+| GET    | `/r/<id>`     | Shared recipe page with JSON-LD; 404 once expired         |
 
 Page content lives in `crates/server/site/` and is compiled into the binary. Before launch, replace the placeholder `support@example.com`.
 
-Configuration: `DATABASE_URL` (default `sqlite://hestia.db`) and `HESTIA_ADDR` (default `127.0.0.1:8000`). In production, put a TLS-terminating reverse proxy in front of it.
+Configuration: `DATABASE_URL` (default `sqlite://hestia.db`), `HESTIA_ADDR` (default `127.0.0.1:8000`), and `HESTIA_PUBLIC_URL`, the origin used in share links (default `http://<HESTIA_ADDR>`). In production, put a TLS-terminating reverse proxy in front of it.
 
 ## Roadmap
 
@@ -108,7 +130,8 @@ Configuration: `DATABASE_URL` (default `sqlite://hestia.db`) and `HESTIA_ADDR` (
 - iCloud Drive sync on the Mac: a "Data folder" setting that can point at `~/Library/Mobile Documents/com~apple~CloudDocs/Hestia`, and reloading when another device changes files there. This works without a paid Apple Developer account.
 - Mac release: a `.dmg` built with `dx bundle` on a GitHub Actions macOS runner
 - With a paid Apple Developer account: notarization, the App Store, and the iPhone app, which syncs through an iCloud container
-- Share and export recipes
+- Export recipes
+- Open `/r/<id>` share links straight in the app (iOS universal links / macOS URL handling) instead of pasting them into import
 - Android release
 
 ## License

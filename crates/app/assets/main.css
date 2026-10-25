@@ -311,3 +311,11 @@ button.danger:hover { background: var(--honey-wash); }
   margin: 0; padding: 12px 14px; overflow-x: auto; font-size: 0.8rem; line-height: 1.5;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px;
 }
+
+/* Share */
+.share-panel {
+  max-width: 640px; margin: 8px 0 16px; padding: 14px 16px;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--card);
+}
+.share-panel .actions { margin: 12px 0 0; }
+.share-link { display: flex; gap: 8px; margin-bottom: 8px; }
