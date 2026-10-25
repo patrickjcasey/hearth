@@ -59,13 +59,19 @@ impl Entry {
 
     /// Whether `self` should replace `other`, which has the same id. On a
     /// tie the delete wins, so a deleted recipe can't come back by accident.
+    /// Two different recipes with the same time are ordered by their JSON, so
+    /// every device picks the same one whatever order they arrive in.
     pub fn supersedes(&self, other: &Entry) -> bool {
         match self.changed_at().cmp(&other.changed_at()) {
             std::cmp::Ordering::Greater => true,
             std::cmp::Ordering::Less => false,
-            std::cmp::Ordering::Equal => {
-                matches!(self, Entry::Deleted(_)) && matches!(other, Entry::Recipe(_))
-            }
+            std::cmp::Ordering::Equal => match (self, other) {
+                (Entry::Deleted(_), Entry::Recipe(_)) => true,
+                (Entry::Recipe(a), Entry::Recipe(b)) => {
+                    serde_json::to_string(a).ok() > serde_json::to_string(b).ok()
+                }
+                _ => false,
+            },
         }
     }
 }
@@ -143,6 +149,15 @@ mod tests {
         let gone = tombstone(&original, 0);
         assert!(gone.supersedes(&Entry::Recipe(original.clone())));
         assert!(!Entry::Recipe(original.clone()).supersedes(&gone));
+    }
+
+    #[test]
+    fn same_time_edits_pick_the_same_winner_in_any_order() {
+        let original = Recipe::new("Soup");
+        let (a, b) = (edited(&original, "Soup A", 5), edited(&original, "Soup B", 5));
+        let ab = merge([Entry::Recipe(a.clone()), Entry::Recipe(b.clone())]);
+        let ba = merge([Entry::Recipe(b), Entry::Recipe(a)]);
+        assert_eq!(ab, ba);
     }
 
     #[test]

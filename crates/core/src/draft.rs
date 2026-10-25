@@ -48,8 +48,9 @@ impl RecipeDraft {
     }
 
     /// Write the draft into `recipe`. The id, favorite flag and creation time
-    /// are kept. Total time is recomputed only when prep or cook time is set,
-    /// so an imported total survives an edit that doesn't touch either.
+    /// are kept. Total time is recomputed only when prep or cook time changed,
+    /// so an imported total (which may include rising or resting time)
+    /// survives an edit that doesn't touch either.
     pub fn apply_to(&self, recipe: &mut Recipe) {
         recipe.title = self.title.trim().to_string();
         recipe.description = text(&self.description);
@@ -63,12 +64,14 @@ impl RecipeDraft {
             recipe.yield_text = None;
         }
         recipe.servings = servings;
-        recipe.prep_minutes = number(&self.prep_minutes);
-        recipe.cook_minutes = number(&self.cook_minutes);
-        if recipe.prep_minutes.is_some() || recipe.cook_minutes.is_some() {
-            recipe.total_minutes =
-                Some(recipe.prep_minutes.unwrap_or(0) + recipe.cook_minutes.unwrap_or(0));
+        let (prep, cook) = (number(&self.prep_minutes), number(&self.cook_minutes));
+        if (prep, cook) != (recipe.prep_minutes, recipe.cook_minutes) {
+            recipe.total_minutes = match (prep, cook) {
+                (None, None) => None,
+                _ => Some(prep.unwrap_or(0).saturating_add(cook.unwrap_or(0))),
+            };
         }
+        (recipe.prep_minutes, recipe.cook_minutes) = (prep, cook);
 
         // Re-parse only lines that changed, so unchanged ingredients keep
         // exactly what the importer produced.
@@ -165,6 +168,28 @@ mod tests {
         draft.servings = "6".into();
         draft.apply_to(&mut r);
         assert_eq!(r.yield_text, None);
+    }
+
+    #[test]
+    fn total_follows_prep_and_cook_only_when_they_change() {
+        let mut r = Recipe::new("Bread");
+        (r.prep_minutes, r.cook_minutes, r.total_minutes) = (Some(20), Some(30), Some(180));
+        let mut draft = RecipeDraft::from_recipe(&r);
+        draft.title = "Rye bread".into();
+        draft.apply_to(&mut r);
+        assert_eq!(r.total_minutes, Some(180), "rising time kept");
+
+        draft.cook_minutes = "40".into();
+        draft.apply_to(&mut r);
+        assert_eq!(r.total_minutes, Some(60));
+
+        (draft.prep_minutes, draft.cook_minutes) = (String::new(), String::new());
+        draft.apply_to(&mut r);
+        assert_eq!((r.prep_minutes, r.cook_minutes, r.total_minutes), (None, None, None));
+
+        (draft.prep_minutes, draft.cook_minutes) = ("4000000000".into(), "4000000000".into());
+        draft.apply_to(&mut r);
+        assert_eq!(r.total_minutes, Some(u32::MAX));
     }
 
     #[test]
