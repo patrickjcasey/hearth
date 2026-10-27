@@ -47,9 +47,9 @@ impl RecipeDraft {
         !self.title.trim().is_empty()
     }
 
-    /// Write the draft into `recipe`. The id, favorite flag and creation time
-    /// are kept. Total time is recomputed only when prep or cook time changed,
-    /// so an imported total (which may include rising or resting time)
+    /// Write the draft into `recipe`. The id, favorite flag, creation time and
+    /// cooking log are kept. Total time is recomputed only when prep or cook time
+    /// changed, so an imported total (which may include rising or resting time)
     /// survives an edit that doesn't touch either.
     pub fn apply_to(&self, recipe: &mut Recipe) {
         recipe.title = self.title.trim().to_string();
@@ -151,6 +151,7 @@ mod tests {
         r.servings = Some(4);
         r.yield_text = Some("4 bowls".into());
         r.ingredients = vec![Ingredient::parse("1 onion")];
+        r.add_note("Needed more salt");
         let (id, created) = (r.id, r.created_at);
 
         let mut draft = RecipeDraft::from_recipe(&r);
@@ -164,6 +165,7 @@ mod tests {
         assert_eq!(r.total_minutes, Some(90), "no prep/cook given, keep imported total");
         assert_eq!(r.yield_text.as_deref(), Some("4 bowls"), "servings unchanged");
         assert_eq!(r.ingredients.len(), 2);
+        assert_eq!(r.cooking_log.len(), 1, "editing keeps the cooking log");
 
         draft.servings = "6".into();
         draft.apply_to(&mut r);

@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local, Utc};
 use dioxus::prelude::*;
 use hestia_core::{Event, GroceryItem};
 use uuid::Uuid;
@@ -18,6 +19,7 @@ pub fn RecipeDetail(id: Uuid) -> Element {
     // "Keep screen on" lasts until it's switched off or the recipe is closed.
     let mut awake = use_signal(|| false);
     use_drop(|| wake::keep_awake(false));
+    let mut note_text = use_signal(String::new);
 
     let data_ref = data.read();
     let Some(recipe) = data_ref.recipe(id) else {
@@ -51,6 +53,16 @@ pub fn RecipeDetail(id: Uuid) -> Element {
         if on {
             usage.write().record(Event::CookStarted);
         }
+    };
+    let add_note = move |_| {
+        let text = note_text();
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some(r) = data.write().recipes.iter_mut().find(|r| r.id == id) {
+            r.add_note(&text);
+        }
+        note_text.set(String::new());
     };
     let delete = move |_| {
         data.write().recipes.retain(|r| r.id != id);
@@ -119,6 +131,44 @@ pub fn RecipeDetail(id: Uuid) -> Element {
                 }
             }
 
+            section { class: "cooking-log",
+                h2 { "Cooking log" }
+                p { class: "meta", "Dated notes from each time you cook this." }
+                div { class: "log-add",
+                    textarea {
+                        rows: "2",
+                        placeholder: "Used 2 tsp salt; bake 5 min less next time",
+                        "aria-label": "New cooking log note",
+                        value: "{note_text}",
+                        oninput: move |e| note_text.set(e.value()),
+                    }
+                    button { class: "primary", disabled: note_text.read().trim().is_empty(), onclick: add_note, "Add note" }
+                }
+                ul { class: "log",
+                    for note in recipe.cooking_log.iter().rev() {
+                        li { key: "{note.id}",
+                            div {
+                                time { class: "meta", datetime: "{note.created_at.to_rfc3339()}", {friendly_date(note.created_at)} }
+                                p { class: "notes", "{note.text}" }
+                            }
+                            button {
+                                class: "quiet",
+                                "aria-label": "Delete note",
+                                onclick: {
+                                    let note_id = note.id;
+                                    move |_| {
+                                        if let Some(r) = data.write().recipes.iter_mut().find(|r| r.id == id) {
+                                            r.remove_note(note_id);
+                                        }
+                                    }
+                                },
+                                "✕"
+                            }
+                        }
+                    }
+                }
+            }
+
             if !recipe.tags.is_empty() {
                 div { class: "tags",
                     for tag in recipe.tags.iter() {
@@ -129,4 +179,9 @@ pub fn RecipeDetail(id: Uuid) -> Element {
             button { class: "danger", onclick: delete, "Delete recipe" }
         }
     }
+}
+
+/// "24 Oct 2026", in the device's time zone.
+fn friendly_date(at: DateTime<Utc>) -> String {
+    at.with_timezone(&Local).format("%-d %b %Y").to_string()
 }

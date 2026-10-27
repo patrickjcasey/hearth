@@ -27,6 +27,8 @@ The app is local-first, so it works offline and costs nothing to run. Recipes ne
 
 The library is a folder with one file per recipe (`recipes/<id>.json`) plus `groceries.json`, so it can live in a synced folder. A deleted recipe leaves a small tombstone file, so a device that was offline during the delete doesn't bring the recipe back. When two versions of a recipe meet, including conflicting copies left by a sync service, the one with the newest `updated_at` wins (`core/src/library.rs`). Libraries saved in the older single-file format (`data.json`) are moved over automatically the first time the app opens.
 
+Besides its standing **Notes** (edited with the rest of the recipe), each recipe has a **Cooking log**: dated notes such as "bake 5 min less", added from the recipe page or when you finish cook mode. The log is saved inside the recipe's file, so it syncs with the recipe under the same newest-wins rule; adding a note counts as an edit.
+
 ## Usage statistics
 
 Settings has two switches, and both are off by default:

@@ -16,5 +16,5 @@ pub use import::{ImportError, parse_recipe_html};
 #[cfg(feature = "fetch")]
 pub use import::fetch_recipe;
 pub use ingredient::{Ingredient, Quantity};
-pub use model::{GroceryItem, Meal, MealPlanEntry, Recipe};
+pub use model::{GroceryItem, Meal, MealPlanEntry, Note, Recipe};
 pub use usage::{Event, UsageReport};

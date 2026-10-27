@@ -281,6 +281,17 @@ button.danger { color: var(--danger); background: none; }
 .tag { padding: 4px 12px; border-radius: 999px; background: var(--fill); font-size: 0.875rem; }
 .notes { white-space: pre-wrap; max-width: 65ch; }
 .recipe .danger { margin-top: 40px; }
+.cooking-log { max-width: 65ch; }
+.cooking-log h2 { margin-bottom: 4px; }
+.log-add { display: flex; gap: 8px; align-items: flex-end; margin: 12px 0 8px; }
+.log li {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--line);
+}
+.log li:last-child { border-bottom: none; }
+.log time { display: block; margin-bottom: 2px; }
+.log .notes { margin: 0; }
+.log button.quiet { padding: 4px 10px; }
 
 /* Groceries */
 .groceries { max-width: 560px; margin-top: 20px; }
