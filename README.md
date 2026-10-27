@@ -137,6 +137,12 @@ TODO: `store.rs` needs to use the app's internal files directory on Android.
 
 Page content lives in `crates/server/site/` and is compiled into the binary. Before launch, replace the placeholder `support@example.com`.
 
+Shared pages are served with a strict `Content-Security-Policy` (no scripts; only the site's stylesheet and the photo load), `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff`. To take a shared recipe down before it expires, delete its row; the `<id>` is the last part of the link:
+
+```sh
+sqlite3 hestia.db "DELETE FROM shares WHERE id = '<id>'"
+```
+
 Configuration: `DATABASE_URL` (default `sqlite://hestia.db`), `HESTIA_ADDR` (default `127.0.0.1:8000`), and `HESTIA_PUBLIC_URL`, the origin used in share links (default `http://<HESTIA_ADDR>`). In production, put a TLS-terminating reverse proxy in front of it. Use an absolute database path such as `DATABASE_URL=sqlite:///var/lib/hestia/hestia.db`; the relative default creates a fresh, empty database in whatever directory the server is started from. The server never reads client addresses, so per-IP rate limiting belongs in the proxy (for nginx, `limit_req` on `/api/` and `client_max_body_size 64k`).
 
 ## Roadmap
