@@ -1,4 +1,5 @@
-//! Opt-in usage statistics: the only data the app can ever send home.
+//! Opt-in usage statistics: the only data the app sends home on its own.
+//! (The other upload is a recipe the user explicitly shares; see `share`.)
 //!
 //! A report is a handful of counters plus an anonymous install id, app
 //! version and platform. There is deliberately no field that could carry
@@ -20,10 +21,11 @@ pub enum Event {
     CookStarted,
     CookFinished,
     GroceriesAdded,
+    RecipeShared,
 }
 
 impl Event {
-    pub const ALL: [Event; 7] = [
+    pub const ALL: [Event; 8] = [
         Event::AppLaunched,
         Event::RecipeCreated,
         Event::RecipeImported,
@@ -31,6 +33,7 @@ impl Event {
         Event::CookStarted,
         Event::CookFinished,
         Event::GroceriesAdded,
+        Event::RecipeShared,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -42,6 +45,7 @@ impl Event {
             Event::CookStarted => "cook_started",
             Event::CookFinished => "cook_finished",
             Event::GroceriesAdded => "groceries_added",
+            Event::RecipeShared => "recipe_shared",
         }
     }
 }

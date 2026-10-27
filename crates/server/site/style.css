@@ -30,3 +30,7 @@ a { color: var(--accent-ink); }
 .prose h1 { margin-top: 12px; }
 footer.site { border-top: 1px solid var(--line); padding: 24px 0 40px; color: var(--muted); font-size: 0.9rem; }
 footer.site a { color: var(--muted); margin-right: 16px; }
+.shared-recipe .meta { color: var(--muted); }
+.shared-recipe .photo { width: 100%; max-height: 420px; object-fit: cover; border-radius: 14px; display: block; }
+.shared-recipe li { margin-bottom: 6px; }
+.shared-recipe .feature { margin-top: 32px; }

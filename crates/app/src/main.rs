@@ -3,6 +3,7 @@
 
 mod analytics;
 mod photos;
+mod share;
 mod store;
 mod views;
 mod wake;
