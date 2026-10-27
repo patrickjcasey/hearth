@@ -84,14 +84,18 @@ impl RecipeDraft {
             .collect();
         recipe.steps = lines(&self.steps).collect();
 
-        let mut seen = HashSet::new();
-        recipe.tags = self
-            .tags
-            .split(',')
-            .map(str::trim)
-            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
-            .map(String::from)
-            .collect();
+        // A tag may itself contain a comma ("Soups, Stews" from an import),
+        // so the field is only re-split once the user has changed it.
+        if self.tags != recipe.tags.join(", ") {
+            let mut seen = HashSet::new();
+            recipe.tags = self
+                .tags
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+                .map(String::from)
+                .collect();
+        }
         recipe.notes = text(&self.notes);
         recipe.touch();
     }
@@ -192,6 +196,22 @@ mod tests {
         (draft.prep_minutes, draft.cook_minutes) = ("4000000000".into(), "4000000000".into());
         draft.apply_to(&mut r);
         assert_eq!(r.total_minutes, Some(u32::MAX));
+    }
+
+    #[test]
+    fn untouched_tags_survive_an_edit() {
+        let mut r = Recipe::new("Stew");
+        r.tags = vec!["Soups, Stews".into(), "winter".into()];
+        let mut draft = RecipeDraft::from_recipe(&r);
+        assert_eq!(draft.tags, "Soups, Stews, winter");
+        draft.title = "Beef stew".into();
+        draft.apply_to(&mut r);
+        assert_eq!(r.tags, ["Soups, Stews", "winter"]);
+
+        // Once edited, the field is split on commas as usual.
+        draft.tags.push_str(", Beef");
+        draft.apply_to(&mut r);
+        assert_eq!(r.tags, ["Soups", "Stews", "winter", "Beef"]);
     }
 
     #[test]
