@@ -50,6 +50,11 @@ pub fn Settings() -> Element {
         section { class: "settings-group",
             h2 { "About" }
             p { class: "meta", "Hestia {env!(\"CARGO_PKG_VERSION\")}, free and open source under the MIT license." }
+            // Which servers this build talks to, so a tester can confirm it.
+            p { class: "meta",
+                "Statistics server: {analytics::EVENTS_URL.unwrap_or(\"none in this build\")}. "
+                "Share links: {crate::share::host().unwrap_or(\"none in this build\")}."
+            }
         }
         }
     }

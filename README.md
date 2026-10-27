@@ -109,6 +109,10 @@ dx bundle --platform desktop --release          # .app / .dmg
 
 Before submitting to the App Store, set your bundle identifier in `crates/app/Dioxus.toml`.
 
+Build the app from a shell that sets the server addresses explicitly, since `dx` bakes in whatever `HESTIA_EVENTS_URL` and `HESTIA_SHARE_URL` happen to be exported (a leftover `http://127.0.0.1:8000` value would ship). The About section in Settings shows which servers a build talks to.
+
+Unsigned test builds on macOS: after copying the app to Applications, the first launch is blocked. Open System Settings, go to Privacy & Security, scroll to the "Hestia was blocked" notice and choose Open Anyway. Alternatively run `xattr -dr com.apple.quarantine /Applications/Hestia.app`. The first export to Downloads asks for permission to that folder.
+
 ### Android (later)
 
 ```sh
@@ -133,7 +137,7 @@ TODO: `store.rs` needs to use the app's internal files directory on Android.
 
 Page content lives in `crates/server/site/` and is compiled into the binary. Before launch, replace the placeholder `support@example.com`.
 
-Configuration: `DATABASE_URL` (default `sqlite://hestia.db`), `HESTIA_ADDR` (default `127.0.0.1:8000`), and `HESTIA_PUBLIC_URL`, the origin used in share links (default `http://<HESTIA_ADDR>`). In production, put a TLS-terminating reverse proxy in front of it.
+Configuration: `DATABASE_URL` (default `sqlite://hestia.db`), `HESTIA_ADDR` (default `127.0.0.1:8000`), and `HESTIA_PUBLIC_URL`, the origin used in share links (default `http://<HESTIA_ADDR>`). In production, put a TLS-terminating reverse proxy in front of it. Use an absolute database path such as `DATABASE_URL=sqlite:///var/lib/hestia/hestia.db`; the relative default creates a fresh, empty database in whatever directory the server is started from. The server never reads client addresses, so per-IP rate limiting belongs in the proxy (for nginx, `limit_req` on `/api/` and `client_max_body_size 64k`).
 
 ## Roadmap
 

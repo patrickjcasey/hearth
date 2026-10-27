@@ -17,7 +17,7 @@ pub enum FetchError {
 pub async fn get(url: &str, max_bytes: u64) -> Result<Vec<u8>, FetchError> {
     let mut res = reqwest::Client::builder()
         // Some sites refuse requests without a browser-like user agent.
-        .user_agent("Mozilla/5.0 (compatible; Hestia/0.1; +https://github.com/)")
+        .user_agent("Mozilla/5.0 (compatible; Hestia/0.1; +https://github.com/patrickjcasey/hearth)")
         .timeout(TIMEOUT)
         .build()?
         .get(url)
