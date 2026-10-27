@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use dioxus::prelude::*;
 use hestia_core::photo::{self, photo_stem};
+use hestia_core::url::is_public_web_url;
 use uuid::Uuid;
 
 use crate::store::{AppData, Library, photo_path};
@@ -72,6 +73,9 @@ pub fn use_photo_cache(library: Rc<RefCell<Library>>, data: Signal<AppData>) {
             .recipes
             .iter()
             .filter_map(|r| r.image_url.as_deref().map(|url| (r.id, photo_stem(r.id, url), url.to_owned())))
+            // `fetch_photo` refuses these anyway; skipping them here keeps
+            // a LAN or file link in a synced library from being retried.
+            .filter(|(_, _, url)| is_public_web_url(url))
             .collect();
         for (id, stem, url) in wanted {
             if photos.peek().contains(&stem) {

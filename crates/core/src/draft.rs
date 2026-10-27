@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::url::is_web_url;
 use crate::{Ingredient, Recipe};
 
 /// Every field is plain text so a UI can bind inputs to it directly.
@@ -55,8 +56,9 @@ impl RecipeDraft {
         recipe.title = self.title.trim().to_string();
         recipe.description = text(&self.description);
         recipe.author = text(&self.author);
-        recipe.source_url = text(&self.source_url);
-        recipe.image_url = text(&self.image_url);
+        // Only web links: the page hands any `href` to the system opener.
+        recipe.source_url = text(&self.source_url).filter(|u| is_web_url(u));
+        recipe.image_url = text(&self.image_url).filter(|u| is_web_url(u));
 
         let servings = number(&self.servings);
         if servings != recipe.servings {
@@ -217,5 +219,20 @@ mod tests {
     #[test]
     fn requires_title() {
         assert!(!RecipeDraft { title: "  ".into(), ..Default::default() }.is_valid());
+    }
+
+    #[test]
+    fn drops_links_that_are_not_web_links() {
+        let draft = |source: &str, image: &str| {
+            RecipeDraft { title: "x".into(), source_url: source.into(), image_url: image.into(), ..Default::default() }
+                .into_recipe()
+        };
+        let ok = draft(" https://example.com/mac ", "http://example.com/mac.jpg");
+        assert_eq!(ok.source_url.as_deref(), Some("https://example.com/mac"));
+        assert_eq!(ok.image_url.as_deref(), Some("http://example.com/mac.jpg"));
+        for bad in ["file:///Users/me/photo.jpg", "javascript:alert(1)", "data:text/html,hi", "example.com/mac"] {
+            let r = draft(bad, bad);
+            assert_eq!((r.source_url, r.image_url), (None, None), "{bad}");
+        }
     }
 }

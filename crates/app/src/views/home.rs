@@ -2,6 +2,7 @@ use dioxus::core::spawn_forever;
 use dioxus::prelude::*;
 
 use hestia_core::Event;
+use hestia_core::url::is_public_web_url;
 use uuid::Uuid;
 
 use crate::photos::use_photo;
@@ -114,7 +115,8 @@ fn RecipeCard(
     total_minutes: Option<u32>,
 ) -> Element {
     // The stored copy when there is one, else the link while it downloads.
-    let src = use_photo(id, image_url.as_deref()).or(image_url);
+    // Only public web links reach the page; a library file could hold anything.
+    let src = use_photo(id, image_url.as_deref()).or(image_url.filter(|u| is_public_web_url(u)));
     // A photo that fails to load (offline, dead link) falls back to the
     // initial, until a different source comes along.
     let mut broken = use_signal(|| None::<String>);

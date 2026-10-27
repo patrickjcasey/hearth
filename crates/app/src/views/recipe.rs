@@ -1,6 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use dioxus::prelude::*;
 use hestia_core::share::SHARE_DAYS;
+use hestia_core::url::{is_public_web_url, is_web_url};
 use hestia_core::{Event, GroceryItem, ShareLink, SharedRecipe};
 use uuid::Uuid;
 
@@ -16,7 +17,8 @@ pub fn RecipeDetail(id: Uuid) -> Element {
     let mut servings = use_signal(|| base_servings.unwrap_or(1));
     let mut added = use_signal(|| false);
     let image_url = data.read().recipe(id).and_then(|r| r.image_url.clone());
-    let hero = use_photo(id, image_url.as_deref()).or(image_url);
+    // The stored copy, else the link itself if it is one the page may load.
+    let hero = use_photo(id, image_url.as_deref()).or(image_url.filter(|u| is_public_web_url(u)));
     let mut hero_broken = use_signal(|| None::<String>);
     // "Keep screen on" lasts until it's switched off or the recipe is closed.
     let mut awake = use_signal(|| false);
@@ -103,7 +105,8 @@ pub fn RecipeDetail(id: Uuid) -> Element {
                 if share::SHARE_URL.is_some() {
                     button { onclick: move |_| share_open.toggle(), disabled: share_open(), "Share" }
                 }
-                if let Some(src) = &recipe.source_url {
+                // The system opener gets any href, so only web links are offered.
+                if let Some(src) = recipe.source_url.as_deref().filter(|u| is_web_url(u)) {
                     a { href: "{src}", target: "_blank", class: "button", "Original" }
                 }
             }

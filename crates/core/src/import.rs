@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::ingredient::Ingredient;
 use crate::model::Recipe;
+use crate::url::is_public_web_url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ImportError {
@@ -200,11 +201,14 @@ fn string_list(v: Option<&Value>) -> Vec<String> {
     }
 }
 
+/// The first photo link that is a public web link. The app fetches it on
+/// every launch and shows it in the page, so `file:`, `javascript:` or
+/// LAN addresses are dropped here.
 fn image(v: Option<&Value>) -> Option<String> {
     match v? {
-        Value::String(s) => Some(s.clone()),
+        Value::String(s) => Some(s.trim().to_string()).filter(|u| is_public_web_url(u)),
         Value::Array(items) => items.iter().find_map(|i| image(Some(i))),
-        Value::Object(obj) => obj.get("url").and_then(Value::as_str).map(str::to_string),
+        Value::Object(obj) => image(obj.get("url")),
         _ => None,
     }
 }
@@ -356,6 +360,21 @@ mod tests {
         // A long but ordinary page still imports.
         let normal = format!("<html><body>{}{script}</body></html>", "<p>hi</p>".repeat(2_500));
         assert_eq!(parse_recipe_html(&normal, None).unwrap().title, "x");
+    }
+
+    #[test]
+    fn image_keeps_only_public_web_links() {
+        let image = |v: Value| super::image(Some(&v));
+        assert_eq!(image(serde_json::json!("https://example.com/a.jpg")).as_deref(), Some("https://example.com/a.jpg"));
+        assert_eq!(image(serde_json::json!({"url": " http://example.com/a.jpg "})).as_deref(), Some("http://example.com/a.jpg"));
+        assert_eq!(
+            image(serde_json::json!(["javascript:alert(4)", {"url": "file:///etc/hosts"}, "https://example.com/b.jpg"]))
+                .as_deref(),
+            Some("https://example.com/b.jpg")
+        );
+        for bad in ["file:///etc/hosts", "javascript:alert(4)", "http://127.0.0.1:8000/x.jpg", "http://nas.local/x.jpg", "/a.jpg"] {
+            assert_eq!(image(serde_json::json!(bad)), None, "{bad}");
+        }
     }
 
     #[test]
