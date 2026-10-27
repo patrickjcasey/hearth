@@ -27,7 +27,16 @@ The app is local-first, so it works offline and costs nothing to run. Recipes ne
 
 The library is a folder with one file per recipe (`recipes/<id>.json`) plus `groceries.json`, so it can live in a synced folder. A deleted recipe leaves a small tombstone file, so a device that was offline during the delete doesn't bring the recipe back. When two versions of a recipe meet, including conflicting copies left by a sync service, the one with the newest `updated_at` wins (`core/src/library.rs`). Libraries saved in the older single-file format (`data.json`) are moved over automatically the first time the app opens.
 
-Besides its standing **Notes** (edited with the rest of the recipe), each recipe has a **Cooking log**: dated notes such as "bake 5 min less", added from the recipe page or when you finish cook mode. The log is saved inside the recipe's file, so it syncs with the recipe under the same newest-wins rule; adding a note counts as an edit.
+Besides its standing **Notes** (edited with the rest of the recipe), each recipe has a **Cooking log**: dated notes such as "bake 5 min less", added from the recipe page. The log is saved inside the recipe's file, so it syncs with the recipe under the same newest-wins rule; adding a note counts as an edit.
+
+## Backups
+
+Sync is not a backup: a delete on one device becomes a tombstone that removes the recipe everywhere. Hestia protects the library in four ways:
+
+- **Safe writes.** Every file is written to a temporary file, flushed to disk, then renamed over the old one, so a crash or power cut leaves either the old or the new version. A damaged file (empty, cut short, or not JSON) is moved aside as `<name>.corrupt-<time>` rather than being overwritten. A file that is valid JSON in a format this version doesn't know, such as one written by a newer version, is left untouched. Renaming it would delete it on every synced device. The recipe stays hidden on this device until the app is updated. Both cases are logged.
+- **Daily snapshots.** When the app opens, it copies `recipes/*.json` and `groceries.json` into `backups/<date>/` in the app folder. This happens at most once a day and only when something changed. The newest 7 snapshots are kept. Photos are left out because they can be downloaded again. To restore, quit the app and copy a snapshot's files over the library's. Restoring a file this way also brings back a recipe that was deleted by mistake.
+- **Export and import.** In Settings, **Export library** writes the whole library to one `hestia-export-<date>.json`, in Downloads on the Mac and in the app's Documents folder on iOS. **Import export…** merges a file like that back in, which helps after a reinstall or on a new device. When the same recipe exists in both places, the copy changed most recently wins, so recipes deleted since the export stay deleted.
+- **The operating system.** The app folder is `~/Library/Application Support/hestia` on the Mac, which Time Machine backs up but iCloud Drive does not sync. On iOS it is `Library/Application Support/hestia` inside the app's sandbox, which is part of iCloud and Finder device backups. Deleting the app on iOS erases the folder, snapshots included, so keep an export somewhere else.
 
 ## Usage statistics
 

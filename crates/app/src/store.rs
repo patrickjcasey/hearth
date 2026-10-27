@@ -12,10 +12,21 @@
 //! groceries.json
 //! ```
 //!
+//! A damaged file (empty, cut short, not JSON) is moved aside as
+//! `<name>.corrupt-<time>` so nothing overwrites it. A file that is valid JSON
+//! but in a shape this version doesn't know, say from a newer app, is left
+//! exactly where it is and not touched; renaming it would delete it on every
+//! synced device. Once a day
+//! the app also keeps a copy of the library under `backups/` (see
+//! [`snapshot`]).
+//!
 //! [`photo`]: hestia_core::photo
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use chrono::{NaiveDate, Utc};
 
 use hestia_core::library::{self, Entry};
 use hestia_core::photo::{photo_stem, stem_belongs_to};
@@ -23,7 +34,10 @@ use hestia_core::{GroceryItem, Recipe};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
+/// The whole library in memory. Also the format of exports and of the old
+/// single-file library.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppData {
     pub recipes: Vec<Recipe>,
     pub groceries: Vec<GroceryItem>,
@@ -55,6 +69,10 @@ pub struct Library {
     dir: PathBuf,
     on_disk: HashMap<Uuid, Entry>,
     groceries_on_disk: Vec<GroceryItem>,
+    /// Recipes with a file this version can't read; never written or removed.
+    held: HashSet<Uuid>,
+    /// Whether `groceries.json` is in a shape this version can't read.
+    groceries_held: bool,
 }
 
 impl Library {
@@ -63,17 +81,26 @@ impl Library {
     pub fn open(dir: impl Into<PathBuf>) -> (Self, AppData) {
         let dir = dir.into();
         let recipes_dir = dir.join("recipes");
-        let legacy: Option<AppData> = read(&dir.join(LEGACY_FILE));
+        let legacy: Option<AppData> = load(&dir.join(LEGACY_FILE)).ok();
 
-        // Every readable entry, and the file it came from.
-        let mut found: Vec<(PathBuf, Entry)> = std::fs::read_dir(&recipes_dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|f| f.ok().map(|f| f.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
-            .filter_map(|p| read::<Entry>(&p).map(|e| (p, e)))
-            .collect();
-        let legacy_recipes = legacy.iter().flat_map(|d| d.recipes.iter().cloned().map(Entry::Recipe));
+        // Every readable entry and the file it came from, plus the ids of
+        // files in a shape this version doesn't know. Those ids are left
+        // alone entirely: hidden here, and never written or removed.
+        let mut found: Vec<(PathBuf, Entry)> = Vec::new();
+        let mut held = HashSet::new();
+        let files = std::fs::read_dir(&recipes_dir).into_iter().flatten().filter_map(|f| f.ok());
+        for path in files.map(|f| f.path()).filter(|p| p.extension().is_some_and(|e| e == "json")) {
+            match load::<Entry>(&path) {
+                Ok(entry) => found.push((path, entry)),
+                Err(Unreadable::Unknown(json)) => held.extend(held_id(&path, &json)),
+                Err(_) => {}
+            }
+        }
+        found.retain(|(_, entry)| !held.contains(&entry.id()));
+        let legacy_recipes = legacy
+            .iter()
+            .flat_map(|d| d.recipes.iter().cloned().map(Entry::Recipe))
+            .filter(|e| !held.contains(&e.id()));
         let merged = library::merge(found.iter().map(|(_, e)| e.clone()).chain(legacy_recipes));
 
         // Write each winner to its own file, then drop the extra copies.
@@ -90,16 +117,28 @@ impl Library {
             }
         }
 
-        let groceries = read(&dir.join(GROCERIES_FILE))
-            .or_else(|| legacy.as_ref().map(|d| d.groceries.clone()))
+        let (groceries, groceries_held) = match load(&dir.join(GROCERIES_FILE)) {
+            Ok(groceries) => (Some(groceries), false),
+            Err(e) => (None, matches!(e, Unreadable::Unknown(_))),
+        };
+        let groceries = groceries
+            .or_else(|| legacy.as_ref().map(|d| d.groceries.clone()).filter(|_| !groceries_held))
             .unwrap_or_default();
         if legacy.is_some() {
-            write(&dir.join(GROCERIES_FILE), &groceries);
+            if !groceries_held {
+                write(&dir.join(GROCERIES_FILE), &groceries);
+            }
             let _ = std::fs::rename(dir.join(LEGACY_FILE), dir.join("data.json.migrated"));
         }
 
         let data = AppData { recipes: library::live_recipes(&merged), groceries };
-        let library = Library { dir, on_disk: merged, groceries_on_disk: data.groceries.clone() };
+        let library = Library {
+            dir,
+            on_disk: merged,
+            groceries_on_disk: data.groceries.clone(),
+            held,
+            groceries_held,
+        };
         (library, data)
     }
 
@@ -131,12 +170,45 @@ impl Library {
         }
 
         if data.groceries != self.groceries_on_disk {
-            write(&self.dir.join(GROCERIES_FILE), &data.groceries);
+            if self.groceries_held {
+                eprintln!("not saving groceries over a list this version can't read");
+            } else {
+                write(&self.dir.join(GROCERIES_FILE), &data.groceries);
+            }
             self.groceries_on_disk = data.groceries.clone();
         }
     }
 
+    /// Merge an export (or an old single-file library) into `current`. The
+    /// usual rules apply, so a recipe deleted after the export was made stays
+    /// deleted and a newer local edit beats the exported copy. Grocery items
+    /// not already on the list are added.
+    pub fn import(&self, current: &AppData, incoming: AppData) -> (AppData, Imported) {
+        let tombstones = self.on_disk.values().filter(|e| e.recipe().is_none()).cloned();
+        let mine = current.recipes.iter().cloned().map(Entry::Recipe);
+        // Recipes this version can't read on disk stay as they are.
+        let theirs = incoming.recipes.into_iter().filter(|r| !self.held.contains(&r.id)).map(Entry::Recipe);
+        let recipes = library::live_recipes(&library::merge(tombstones.chain(mine).chain(theirs)));
+
+        let mut summary = Imported::default();
+        for r in &recipes {
+            match current.recipe(r.id) {
+                None => summary.added += 1,
+                Some(before) if before != r => summary.updated += 1,
+                Some(_) => {}
+            }
+        }
+        let mut groceries = current.groceries.clone();
+        let known: HashSet<Uuid> = groceries.iter().map(|g| g.id).collect();
+        groceries.extend(incoming.groceries.into_iter().filter(|g| !known.contains(&g.id)));
+        (AppData { recipes, groceries }, summary)
+    }
+
     fn store(&mut self, recipes_dir: &Path, entry: Entry) {
+        if self.held.contains(&entry.id()) {
+            eprintln!("not saving {} over a file this version can't read", entry.id());
+            return;
+        }
         write(&recipe_path(recipes_dir, entry.id()), &entry);
         self.on_disk.insert(entry.id(), entry);
     }
@@ -169,6 +241,13 @@ impl Library {
         std::fs::write(&tmp, jpeg)?;
         std::fs::rename(tmp, path)
     }
+}
+
+/// What [`Library::import`] changed.
+#[derive(Debug, Default, PartialEq)]
+pub struct Imported {
+    pub added: usize,
+    pub updated: usize,
 }
 
 const PHOTO_EXT: &str = "jpg";
@@ -222,19 +301,156 @@ fn read<T: DeserializeOwned>(path: &Path) -> Option<T> {
         .ok()
 }
 
-fn write(path: &Path, value: &impl Serialize) {
-    let result = (|| -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+/// Why [`load`] returned nothing.
+#[derive(Debug)]
+enum Unreadable {
+    /// Missing, or the OS wouldn't read it.
+    Missing,
+    /// Empty or not JSON; it has been moved aside.
+    Damaged,
+    /// Valid JSON in a shape this version doesn't know; left untouched.
+    Unknown(serde_json::Value),
+}
+
+/// Like [`read`] for library files. A damaged file is moved aside so a later
+/// save can't overwrite it; one that is valid JSON but not a `T` (perhaps
+/// from a newer version) is left in place for the caller to protect.
+fn load<T: DeserializeOwned>(path: &Path) -> Result<T, Unreadable> {
+    let bytes = std::fs::read(path).map_err(|_| Unreadable::Missing)?;
+    let json = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(json) => json,
+        Err(e) => {
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(format!(".corrupt-{}", Utc::now().format("%Y%m%dT%H%M%S%.3f")));
+            match std::fs::rename(path, &aside) {
+                Ok(()) => eprintln!("moved damaged {} aside ({e})", path.display()),
+                Err(re) => eprintln!("damaged {} ({e}) could not be moved: {re}", path.display()),
+            }
+            return Err(Unreadable::Damaged);
         }
-        // Write-then-rename so a crash mid-write can't corrupt the file.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
-        std::fs::rename(tmp, path)
-    })();
-    if let Err(e) = result {
+    };
+    T::deserialize(&json).map_err(|e| {
+        eprintln!("leaving {} alone, written in an unknown format: {e}", path.display());
+        Unreadable::Unknown(json)
+    })
+}
+
+/// The recipe an unrecognized file belongs to: its `id` field, or else the
+/// id its name starts with.
+fn held_id(path: &Path, json: &serde_json::Value) -> Option<Uuid> {
+    let from_json = json.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok());
+    let name = path.file_name()?.to_str()?;
+    from_json.or_else(|| name.get(..36)?.parse().ok())
+}
+
+fn write(path: &Path, value: &impl Serialize) {
+    if let Err(e) = try_write(path, value) {
         eprintln!("failed to save {}: {e}", path.display());
     }
+}
+
+/// Write-then-rename so a crash mid-write leaves the old file intact. The
+/// data is flushed before the rename so a power cut can't leave the new name
+/// pointing at an empty file.
+fn try_write(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.sync_all()?;
+    std::fs::rename(tmp, path)
+}
+
+/// How many daily snapshots [`snapshot`] keeps.
+pub const KEEP_SNAPSHOTS: usize = 7;
+
+/// Copy the library's recipe files and grocery list into
+/// `backups/<today>/`, at most once a day and only if something changed
+/// since the newest snapshot, then drop all but the newest
+/// [`KEEP_SNAPSHOTS`]. Photos are left out; they can be downloaded again.
+/// Returns whether a snapshot was taken.
+///
+/// To restore, quit the app and copy a snapshot's files over the library's.
+pub fn snapshot(library_dir: &Path, backups: &Path, today: NaiveDate) -> std::io::Result<bool> {
+    let target = backups.join(today.to_string());
+    if target.exists() {
+        return Ok(false);
+    }
+    let files = library_files(library_dir);
+    let newest = snapshots(backups).pop();
+    if files.is_empty() || newest.is_some_and(|(_, dir)| library_files(&dir) == files) {
+        return Ok(false);
+    }
+
+    // Built beside the target and renamed into place, so a half-written
+    // snapshot never looks like a real one.
+    let tmp = backups.join(format!(".{today}.tmp"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    for (name, bytes) in &files {
+        let path = tmp.join(name);
+        std::fs::create_dir_all(path.parent().expect("snapshot files sit in a folder"))?;
+        std::fs::write(path, bytes)?;
+    }
+    std::fs::rename(&tmp, &target)?;
+
+    let all = snapshots(backups);
+    for (_, old) in &all[..all.len().saturating_sub(KEEP_SNAPSHOTS)] {
+        if let Err(e) = std::fs::remove_dir_all(old) {
+            eprintln!("failed to remove {}: {e}", old.display());
+        }
+    }
+    Ok(true)
+}
+
+/// Snapshot folders in `backups`, oldest first.
+fn snapshots(backups: &Path) -> Vec<(NaiveDate, PathBuf)> {
+    let mut found: Vec<(NaiveDate, PathBuf)> = std::fs::read_dir(backups)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.ok().map(|f| f.path()))
+        .filter_map(|p| Some((p.file_name()?.to_str()?.parse().ok()?, p)))
+        .collect();
+    found.sort();
+    found
+}
+
+/// The files a snapshot holds, by path relative to the library, sorted.
+fn library_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let recipes = std::fs::read_dir(dir.join("recipes"))
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.ok().map(|f| f.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter_map(|p| Some(format!("recipes/{}", p.file_name()?.to_str()?)));
+    let mut files: Vec<(String, Vec<u8>)> = recipes
+        .chain([GROCERIES_FILE.to_owned()])
+        .filter_map(|name| Some((std::fs::read(dir.join(&name)).ok()?, name)))
+        .map(|(bytes, name)| (name, bytes))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Where exports go: Downloads on the Mac, and on iOS the app's Documents
+/// folder, which the Files app can show.
+pub fn export_dir() -> PathBuf {
+    #[cfg(target_os = "ios")]
+    let dir = dirs::document_dir();
+    #[cfg(not(target_os = "ios"))]
+    let dir = dirs::download_dir();
+    dir.unwrap_or_else(app_dir)
+}
+
+/// Save the whole library as one `hestia-export-<today>.json` in `dir`. The
+/// file has the old single-file layout, so [`Library::import`] (or moving it
+/// in as `data.json`) reads it back.
+pub fn export(data: &AppData, dir: &Path, today: NaiveDate) -> std::io::Result<PathBuf> {
+    let path = dir.join(format!("hestia-export-{today}.json"));
+    try_write(&path, data)?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -382,5 +598,215 @@ mod tests {
         assert!(tmp.0.join("data.json.migrated").exists());
         assert_eq!(tmp.files().len(), 2);
         assert_eq!(Library::open(&tmp.0).1, data);
+    }
+
+    /// Names in `dir` starting with `prefix`.
+    fn names_like(dir: &Path, prefix: &str) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|f| f.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with(prefix))
+            .collect()
+    }
+
+    #[test]
+    fn writes_leave_no_temporary_files() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        library.save(&sample());
+        assert!(tmp.files().iter().all(|f| f.ends_with(".json")), "{:?}", tmp.files());
+        assert!(!tmp.0.join("groceries.json.tmp").exists());
+    }
+
+    #[test]
+    fn an_unreadable_recipe_is_set_aside_not_overwritten() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let data = sample();
+        library.save(&data);
+
+        // The file is damaged, and a sync service left an older copy beside it.
+        let recipes_dir = tmp.0.join("recipes");
+        let soup = &data.recipes[0];
+        let path = recipe_path(&recipes_dir, soup.id);
+        let older = recipes_dir.join(format!("{} 2.json", soup.id));
+        std::fs::rename(&path, &older).unwrap();
+        std::fs::write(&path, "{\"id\": \"trunc").unwrap();
+
+        let (_, reopened) = Library::open(&tmp.0);
+        assert_eq!(reopened, data, "the readable copy is used");
+        let aside = names_like(&recipes_dir, &format!("{}.json.corrupt-", soup.id));
+        assert_eq!(aside.len(), 1, "{:?}", tmp.files());
+        assert_eq!(std::fs::read_to_string(recipes_dir.join(&aside[0])).unwrap(), "{\"id\": \"trunc");
+
+        // With no other copy, the recipe is skipped but neither deleted nor lost.
+        let bread = &data.recipes[1];
+        std::fs::write(recipe_path(&recipes_dir, bread.id), "garbage").unwrap();
+        let (mut library, reopened) = Library::open(&tmp.0);
+        assert_eq!(reopened.recipes, vec![soup.clone()]);
+        library.save(&reopened);
+        assert!(!recipe_path(&recipes_dir, bread.id).exists(), "no tombstone was written");
+        assert_eq!(names_like(&recipes_dir, &format!("{}.json.corrupt-", bread.id)).len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_grocery_list_is_set_aside() {
+        let tmp = TempDir::new();
+        std::fs::write(tmp.0.join(GROCERIES_FILE), "[{\"text\":").unwrap();
+        let (mut library, data) = Library::open(&tmp.0);
+        assert!(data.groceries.is_empty());
+        library.save(&AppData { groceries: vec![GroceryItem::new("Eggs", None)], ..data });
+
+        let aside = names_like(&tmp.0, "groceries.json.corrupt-");
+        assert_eq!(aside.len(), 1);
+        assert_eq!(std::fs::read_to_string(tmp.0.join(&aside[0])).unwrap(), "[{\"text\":");
+    }
+
+    #[test]
+    fn a_file_from_a_newer_version_is_left_alone() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let mut data = sample();
+        library.save(&data);
+        let recipes_dir = tmp.0.join("recipes");
+
+        // Valid JSON this version can't read, beside an older readable copy,
+        // next to a file that was cut short.
+        let soup = data.recipes[0].clone();
+        let newer = format!(r#"{{"id": "{}", "format": 2, "title": {{"en": "Soup"}}}}"#, soup.id);
+        let path = recipe_path(&recipes_dir, soup.id);
+        let copy = recipes_dir.join(format!("{} 2.json", soup.id));
+        std::fs::rename(&path, &copy).unwrap();
+        std::fs::write(&path, &newer).unwrap();
+        let bread = &data.recipes[1];
+        std::fs::write(recipe_path(&recipes_dir, bread.id), "{\"id\": \"tru").unwrap();
+        let groceries = r#"{"lists": []}"#;
+        std::fs::write(tmp.0.join(GROCERIES_FILE), groceries).unwrap();
+
+        let (mut library, mut reopened) = Library::open(&tmp.0);
+        assert!(reopened.recipes.is_empty(), "both are hidden: {reopened:?}");
+        assert!(reopened.groceries.is_empty());
+        // Saving, even a recipe with the held id, writes nothing over it.
+        reopened.recipes.push(soup.clone());
+        reopened.groceries.push(GroceryItem::new("Eggs", None));
+        library.save(&reopened);
+        library.save(&AppData::default());
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer, "untouched byte for byte");
+        assert!(copy.exists(), "its conflicting copy is kept");
+        assert!(names_like(&recipes_dir, &format!("{}.json.corrupt-", soup.id)).is_empty());
+        assert_eq!(std::fs::read_to_string(tmp.0.join(GROCERIES_FILE)).unwrap(), groceries);
+        assert!(names_like(&tmp.0, "groceries.json.corrupt-").is_empty());
+        assert_eq!(names_like(&recipes_dir, &format!("{}.json.corrupt-", bread.id)).len(), 1);
+
+        // Once the newer version is gone, the readable copy is used again.
+        std::fs::remove_file(&path).unwrap();
+        data.recipes.remove(1);
+        data.groceries.clear();
+        assert_eq!(Library::open(&tmp.0).1, data);
+    }
+
+    fn day(n: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, n).unwrap()
+    }
+
+    #[test]
+    fn snapshots_daily_only_when_changed() {
+        let tmp = TempDir::new();
+        let backups = tmp.0.join("backups");
+        assert!(!snapshot(&tmp.0, &backups, day(1)).unwrap(), "nothing to back up yet");
+
+        let (mut library, _) = Library::open(&tmp.0);
+        let mut data = sample();
+        library.save(&data);
+        assert!(snapshot(&tmp.0, &backups, day(1)).unwrap());
+        let first = backups.join("2026-10-01");
+        assert_eq!(library_files(&first), library_files(&tmp.0));
+        assert_eq!(library_files(&first).len(), 3);
+
+        data.recipes[0].title = "Onion soup".into();
+        data.recipes[0].touch();
+        library.save(&data);
+        assert!(!snapshot(&tmp.0, &backups, day(1)).unwrap(), "once a day");
+        assert!(snapshot(&tmp.0, &backups, day(2)).unwrap());
+        assert!(!snapshot(&tmp.0, &backups, day(3)).unwrap(), "unchanged since day 2");
+
+        // A snapshot restores the library as it was, deleted recipes included.
+        let gone = data.recipes.remove(1);
+        library.save(&data);
+        std::fs::copy(
+            first.join(format!("recipes/{}.json", gone.id)),
+            recipe_path(&tmp.0.join("recipes"), gone.id),
+        )
+        .unwrap();
+        assert!(Library::open(&tmp.0).1.recipe(gone.id).is_some());
+    }
+
+    #[test]
+    fn keeps_the_newest_snapshots() {
+        let tmp = TempDir::new();
+        let backups = tmp.0.join("backups");
+        let (mut library, _) = Library::open(&tmp.0);
+        let mut data = sample();
+        for n in 1..=10 {
+            data.groceries.push(GroceryItem::new(format!("item {n}"), None));
+            library.save(&data);
+            assert!(snapshot(&tmp.0, &backups, day(n)).unwrap());
+        }
+        let kept: Vec<NaiveDate> = snapshots(&backups).into_iter().map(|(d, _)| d).collect();
+        assert_eq!(kept, (4..=10).map(day).collect::<Vec<_>>());
+        assert_eq!(std::fs::read_dir(&backups).unwrap().count(), KEEP_SNAPSHOTS, "no leftovers");
+    }
+
+    #[test]
+    fn export_round_trips_through_import() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let data = sample();
+        library.save(&data);
+        let path = export(&data, &tmp.0, day(24)).unwrap();
+        assert!(path.ends_with("hestia-export-2026-10-24.json"));
+
+        // On a fresh install, importing brings everything back.
+        let fresh = TempDir::new();
+        let (mut other, empty) = Library::open(&fresh.0);
+        let incoming: AppData = read(&path).unwrap();
+        let (restored, summary) = other.import(&empty, incoming);
+        assert_eq!(restored, data);
+        assert_eq!(summary, Imported { added: 2, updated: 0 });
+        other.save(&restored);
+        assert_eq!(Library::open(&fresh.0).1, data);
+    }
+
+    #[test]
+    fn import_never_undoes_newer_changes() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let exported = sample();
+        library.save(&exported);
+
+        // After the export, one recipe was deleted and the other edited.
+        let mut now = exported.clone();
+        let deleted = now.recipes.remove(1);
+        now.recipes[0].title = "Onion soup".into();
+        now.recipes[0].updated_at += Duration::minutes(1);
+        now.groceries.clear();
+        library.save(&now);
+
+        let mut extra = Recipe::new("Pie");
+        extra.created_at = deleted.created_at - Duration::days(1);
+        let mut incoming = exported.clone();
+        incoming.recipes.push(extra.clone());
+        let (merged, summary) = library.import(&now, incoming);
+        assert_eq!(merged.recipes, vec![now.recipes[0].clone(), extra]);
+        assert!(merged.recipe(deleted.id).is_none(), "the delete stands");
+        assert_eq!(merged.groceries, exported.groceries, "missing items come back");
+        assert_eq!(summary, Imported { added: 1, updated: 0 });
+    }
+
+    #[test]
+    fn reads_an_export_missing_fields() {
+        let data: AppData = serde_json::from_str(r#"{"recipes": []}"#).unwrap();
+        assert_eq!(data, AppData::default());
     }
 }

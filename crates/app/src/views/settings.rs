@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
-use crate::{analytics, use_usage};
+use crate::store::{self, AppData};
+use crate::{analytics, use_data, use_library, use_usage};
 
 #[component]
 pub fn Settings() -> Element {
@@ -44,6 +45,8 @@ pub fn Settings() -> Element {
             }
         }
 
+        Backups {}
+
         section { class: "settings-group",
             h2 { "About" }
             p { class: "meta", "Hestia {env!(\"CARGO_PKG_VERSION\")}, free and open source under the MIT license." }
@@ -73,6 +76,64 @@ fn Toggle(
                 checked: on,
                 disabled,
                 onchange: move |e| onchange.call(e.checked()),
+            }
+        }
+    }
+}
+
+#[component]
+fn Backups() -> Element {
+    let mut data = use_data();
+    let library = use_library();
+    let mut status = use_signal(String::new);
+
+    let export = move |_| {
+        let today = chrono::Local::now().date_naive();
+        status.set(match store::export(&data.read(), &store::export_dir(), today) {
+            Ok(path) => format!("Saved to {}", path.display()),
+            Err(e) => format!("Export failed: {e}"),
+        });
+    };
+
+    let import = move |e: FormEvent| {
+        let library = library.clone();
+        async move {
+            let Some(file) = e.files().into_iter().next() else { return };
+            let text = match file.read_string().await {
+                Ok(text) => text,
+                Err(e) => return status.set(format!("Couldn't read {}: {e}", file.name())),
+            };
+            let incoming: AppData = match serde_json::from_str(&text) {
+                Ok(incoming) => incoming,
+                Err(_) => return status.set(format!("{} isn't a Hestia export.", file.name())),
+            };
+            let (merged, summary) = library.borrow().import(&data.read(), incoming);
+            data.set(merged);
+            status.set(format!("Added {} recipes and updated {}.", summary.added, summary.updated));
+        }
+    };
+
+    rsx! {
+        section { class: "settings-group",
+            h2 { "Backups" }
+            p { class: "meta",
+                "Hestia keeps a copy of your library each day you open it, for the last "
+                "{store::KEEP_SNAPSHOTS} days with changes, in the backups folder beside your recipes. "
+                "Export a copy to keep somewhere else too."
+            }
+            div { class: "backup-actions",
+                button { onclick: export, "Export library" }
+                label { class: "button",
+                    "Import export…"
+                    input { r#type: "file", accept: ".json,application/json", hidden: true, onchange: import }
+                }
+            }
+            p { class: "meta",
+                "Importing adds missing recipes and keeps whichever copy of a recipe was changed "
+                "last. Recipes deleted since the export stay deleted."
+            }
+            if !status.read().is_empty() {
+                p { class: "meta", "{status}" }
             }
         }
     }

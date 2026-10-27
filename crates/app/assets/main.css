@@ -326,6 +326,8 @@ button.danger { color: var(--danger); background: none; }
 .settings { max-width: 560px; }
 .settings-group { margin-bottom: 40px; }
 .settings-group h2 { margin-top: 0; }
+.backup-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.backup-actions .button { cursor: pointer; }
 .settings-group h3 { font-size: 0.875rem; font-weight: 600; letter-spacing: 0; margin: 20px 0 8px; }
 /* Consecutive toggle rows read as one inset card. */
 .toggle-row {
