@@ -73,6 +73,9 @@ pub struct Library {
     held: HashSet<Uuid>,
     /// Whether `groceries.json` is in a shape this version can't read.
     groceries_held: bool,
+    /// Why the last save couldn't write everything, if it couldn't. What
+    /// failed stays pending, so the next save tries again.
+    last_error: Option<String>,
 }
 
 impl Library {
@@ -103,15 +106,33 @@ impl Library {
             .filter(|e| !held.contains(&e.id()));
         let merged = library::merge(found.iter().map(|(_, e)| e.clone()).chain(legacy_recipes));
 
-        // Write each winner to its own file, then drop the extra copies.
-        found.retain(|(path, entry)| *path != recipe_path(&recipes_dir, entry.id()));
+        // Write each winner to its own file, then drop the extra copies, but
+        // only once the winner is known to be in place: a copy may be the
+        // only good version left. On a case-insensitive volume a file named
+        // in different case *is* the canonical file, and must not go either.
+        found.retain(|(path, entry)| {
+            let canonical = recipe_path(&recipes_dir, entry.id());
+            *path != canonical && !same_file(path, &canonical)
+        });
+        let mut all_written = true;
+        let mut settled = HashSet::new();
         for (id, entry) in &merged {
             let path = recipe_path(&recipes_dir, *id);
-            if read::<Entry>(&path).as_ref() != Some(entry) {
-                write(&path, entry);
+            if read::<Entry>(&path).as_ref() != Some(entry)
+                && let Err(e) = try_write(&path, entry)
+            {
+                eprintln!("failed to save {}: {e}", path.display());
+                all_written = false;
+                continue;
+            }
+            if read::<Entry>(&path).as_ref() == Some(entry) {
+                settled.insert(*id);
             }
         }
-        for (copy, _) in found {
+        for (copy, entry) in found {
+            if !settled.contains(&entry.id()) {
+                continue;
+            }
             if let Err(e) = std::fs::remove_file(&copy) {
                 eprintln!("failed to remove {}: {e}", copy.display());
             }
@@ -125,10 +146,17 @@ impl Library {
             .or_else(|| legacy.as_ref().map(|d| d.groceries.clone()).filter(|_| !groceries_held))
             .unwrap_or_default();
         if legacy.is_some() {
-            if !groceries_held {
-                write(&dir.join(GROCERIES_FILE), &groceries);
+            if !groceries_held
+                && let Err(e) = try_write(&dir.join(GROCERIES_FILE), &groceries)
+            {
+                eprintln!("failed to save {GROCERIES_FILE}: {e}");
+                all_written = false;
             }
-            let _ = std::fs::rename(dir.join(LEGACY_FILE), dir.join("data.json.migrated"));
+            // The old file is only set aside once everything in it is safely
+            // in the new layout; otherwise the next open tries again.
+            if all_written {
+                let _ = std::fs::rename(dir.join(LEGACY_FILE), dir.join("data.json.migrated"));
+            }
         }
 
         let data = AppData { recipes: library::live_recipes(&merged), groceries };
@@ -138,13 +166,17 @@ impl Library {
             groceries_on_disk: data.groceries.clone(),
             held,
             groceries_held,
+            last_error: None,
         };
         (library, data)
     }
 
     /// Write whatever changed since the last save. Recipes missing from
-    /// `data` were deleted, so they get a tombstone.
+    /// `data` were deleted, so they get a tombstone. Anything that couldn't
+    /// be written is reported by [`last_error`](Self::last_error) and tried
+    /// again next time.
     pub fn save(&mut self, data: &AppData) {
+        self.last_error = None;
         let recipes_dir = self.dir.join("recipes");
         let mut live = HashSet::with_capacity(data.recipes.len());
         for recipe in &data.recipes {
@@ -172,11 +204,25 @@ impl Library {
         if data.groceries != self.groceries_on_disk {
             if self.groceries_held {
                 eprintln!("not saving groceries over a list this version can't read");
+                self.groceries_on_disk = data.groceries.clone();
             } else {
-                write(&self.dir.join(GROCERIES_FILE), &data.groceries);
+                let path = self.dir.join(GROCERIES_FILE);
+                match try_write(&path, &data.groceries) {
+                    Ok(()) => self.groceries_on_disk = data.groceries.clone(),
+                    Err(e) => self.failed(&path, e),
+                }
             }
-            self.groceries_on_disk = data.groceries.clone();
         }
+    }
+
+    /// Why the last [`save`](Self::save) couldn't write everything, if so.
+    pub fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
+    }
+
+    fn failed(&mut self, path: &Path, e: std::io::Error) {
+        eprintln!("failed to save {}: {e}", path.display());
+        self.last_error.get_or_insert_with(|| e.to_string());
     }
 
     /// Merge an export (or an old single-file library) into `current`. The
@@ -204,13 +250,20 @@ impl Library {
         (AppData { recipes, groceries }, summary)
     }
 
+    /// Write one entry. `on_disk` only learns of it once the write
+    /// succeeded, so a failed write is retried by the next save.
     fn store(&mut self, recipes_dir: &Path, entry: Entry) {
         if self.held.contains(&entry.id()) {
             eprintln!("not saving {} over a file this version can't read", entry.id());
             return;
         }
-        write(&recipe_path(recipes_dir, entry.id()), &entry);
-        self.on_disk.insert(entry.id(), entry);
+        let path = recipe_path(recipes_dir, entry.id());
+        match try_write(&path, &entry) {
+            Ok(()) => {
+                self.on_disk.insert(entry.id(), entry);
+            }
+            Err(e) => self.failed(&path, e),
+        }
     }
 
     /// The folder holding recipes and their photos.
@@ -265,6 +318,26 @@ fn recipe_id(stem: &str) -> Option<Uuid> {
     stem.get(..36).and_then(|s| s.parse().ok()).filter(|id| stem_belongs_to(stem, *id))
 }
 
+/// Whether two paths name one file, as differently cased names do on a
+/// case-insensitive volume.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::metadata(a), std::fs::metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// Remove every photo of recipe `id` except `keep`.
 fn prune_photos(recipes_dir: &Path, id: Uuid, keep: Option<&str>) {
     let stale = std::fs::read_dir(recipes_dir)
@@ -290,7 +363,7 @@ pub fn read_json<T: DeserializeOwned + Default>(name: &str) -> T {
     read(&app_dir().join(name)).unwrap_or_default()
 }
 
-pub fn write_json(name: &str, value: &impl Serialize) {
+pub fn write_json<T: Serialize + DeserializeOwned>(name: &str, value: &T) {
     write(&app_dir().join(name), value);
 }
 
@@ -343,7 +416,7 @@ fn held_id(path: &Path, json: &serde_json::Value) -> Option<Uuid> {
     from_json.or_else(|| name.get(..36)?.parse().ok())
 }
 
-fn write(path: &Path, value: &impl Serialize) {
+fn write<T: Serialize + DeserializeOwned>(path: &Path, value: &T) {
     if let Err(e) = try_write(path, value) {
         eprintln!("failed to save {}: {e}", path.display());
     }
@@ -351,17 +424,26 @@ fn write(path: &Path, value: &impl Serialize) {
 
 /// Write-then-rename so a crash mid-write leaves the old file intact. The
 /// data is flushed before the rename so a power cut can't leave the new name
-/// pointing at an empty file.
-fn try_write(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
+/// pointing at an empty file. The bytes must read back as a `T` first (an
+/// infinite number serializes as `null`, say), or the file isn't touched.
+fn try_write<T: Serialize + DeserializeOwned>(path: &Path, value: &T) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(value)?;
+    if let Err(e) = serde_json::from_slice::<T>(&bytes) {
+        let msg = format!("{} would not read back: {e}", path.display());
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, msg));
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    let mut file = std::fs::File::create(&tmp)?;
-    file.write_all(&serde_json::to_vec_pretty(value)?)?;
-    file.sync_all()?;
-    std::fs::rename(tmp, path)
+    let result = std::fs::File::create(&tmp)
+        .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// How many daily snapshots [`snapshot`] keeps.
@@ -584,6 +666,157 @@ mod tests {
         let (_, reopened) = Library::open(&tmp.0);
         assert_eq!(reopened.recipes[0], theirs);
         assert_eq!(tmp.files().len(), 2, "the extra copy is removed: {:?}", tmp.files());
+    }
+
+    #[test]
+    fn a_failed_write_is_retried_by_the_next_save() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let data = sample();
+        let soup = &data.recipes[0];
+        let path = recipe_path(&tmp.0.join("recipes"), soup.id);
+        // A folder in the file's place makes the rename fail, like a full disk would.
+        std::fs::create_dir_all(&path).unwrap();
+        library.save(&data);
+        assert!(!library.on_disk.contains_key(&soup.id), "not recorded as saved");
+        assert!(library.on_disk.contains_key(&data.recipes[1].id), "the other one was");
+        assert!(library.last_error().is_some());
+
+        std::fs::remove_dir(&path).unwrap();
+        library.save(&data);
+        assert!(path.is_file());
+        assert!(library.on_disk.contains_key(&soup.id));
+        assert_eq!(library.last_error(), None);
+        assert_eq!(Library::open(&tmp.0).1, data);
+    }
+
+    #[test]
+    fn a_failed_delete_is_retried_by_the_next_save() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let mut data = sample();
+        library.save(&data);
+        let gone = data.recipes.remove(0);
+        let path = recipe_path(&tmp.0.join("recipes"), gone.id);
+
+        // Stop the tombstone from landing.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        library.save(&data);
+        assert!(library.last_error().is_some());
+        assert!(library.on_disk[&gone.id].recipe().is_some(), "the delete is still pending");
+
+        std::fs::remove_dir(&path).unwrap();
+        library.save(&data);
+        assert!(matches!(read::<Entry>(&path), Some(Entry::Deleted(_))));
+        assert_eq!(Library::open(&tmp.0).1, data);
+    }
+
+    #[test]
+    fn a_failed_grocery_write_is_retried_by_the_next_save() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let data = sample();
+        let path = tmp.0.join(GROCERIES_FILE);
+        std::fs::create_dir_all(&path).unwrap();
+        library.save(&data);
+        assert!(library.last_error().is_some());
+        assert_ne!(library.groceries_on_disk, data.groceries);
+
+        std::fs::remove_dir(&path).unwrap();
+        library.save(&data);
+        assert_eq!(library.last_error(), None);
+        assert_eq!(Library::open(&tmp.0).1.groceries, data.groceries);
+    }
+
+    #[test]
+    fn a_conflicting_copy_outlives_a_failed_write() {
+        let tmp = TempDir::new();
+        let recipes_dir = tmp.0.join("recipes");
+        let soup = Recipe::new("Soup");
+        let copy = recipes_dir.join(format!("{} 2.json", soup.id));
+        write(&copy, &Entry::Recipe(soup.clone()));
+        let path = recipe_path(&recipes_dir, soup.id);
+        std::fs::create_dir_all(&path).unwrap();
+
+        let (_, data) = Library::open(&tmp.0);
+        assert_eq!(data.recipes, vec![soup.clone()]);
+        assert!(copy.exists(), "the only good version is kept");
+
+        std::fs::remove_dir(&path).unwrap();
+        let (_, data) = Library::open(&tmp.0);
+        assert_eq!(data.recipes, vec![soup.clone()]);
+        assert_eq!(tmp.files(), vec![format!("{}.json", soup.id)], "then tidied once it is safe");
+    }
+
+    #[test]
+    fn a_copy_that_is_the_same_file_is_not_removed() {
+        let tmp = TempDir::new();
+        let recipes_dir = tmp.0.join("recipes");
+        let soup = Recipe::new("Soup");
+        let path = recipe_path(&recipes_dir, soup.id);
+        write(&path, &Entry::Recipe(soup.clone()));
+        // Another name for the very same file, as a differently cased name
+        // is on a case-insensitive volume.
+        let alias = recipes_dir.join(format!("{} 2.json", soup.id));
+        std::fs::hard_link(&path, &alias).unwrap();
+
+        let (_, data) = Library::open(&tmp.0);
+        assert_eq!(data.recipes, vec![soup.clone()]);
+        assert!(path.is_file() && alias.is_file());
+        assert_eq!(read::<Entry>(&path), Some(Entry::Recipe(soup.clone())));
+    }
+
+    #[test]
+    fn a_differently_cased_file_name_survives_open() {
+        let tmp = TempDir::new();
+        let recipes_dir = tmp.0.join("recipes");
+        let soup = Recipe::new("Soup");
+        let upper = recipes_dir.join(format!("{}.json", soup.id.to_string().to_uppercase()));
+        write(&upper, &Entry::Recipe(soup.clone()));
+
+        // Whether the volume is case-sensitive or not, the recipe is still
+        // there afterwards, in exactly one file.
+        let (_, data) = Library::open(&tmp.0);
+        assert_eq!(data.recipes, vec![soup.clone()]);
+        assert_eq!(tmp.files().len(), 1, "{:?}", tmp.files());
+        assert_eq!(Library::open(&tmp.0).1.recipes, vec![soup]);
+    }
+
+    #[test]
+    fn a_recipe_that_would_not_read_back_is_not_written() {
+        let tmp = TempDir::new();
+        let (mut library, _) = Library::open(&tmp.0);
+        let mut data = sample();
+        let mut flour = hestia_core::Ingredient::parse("1 cup flour");
+        flour.quantity = Some(hestia_core::Quantity { amount: f64::INFINITY, upper: None });
+        data.recipes[0].ingredients = vec![flour];
+        library.save(&data);
+
+        let path = recipe_path(&tmp.0.join("recipes"), data.recipes[0].id);
+        assert!(!path.exists(), "nothing landed on disk");
+        assert!(!path.with_extension("json.tmp").exists());
+        assert!(library.last_error().is_some_and(|e| e.contains("read back")), "{:?}", library.last_error());
+        assert_eq!(Library::open(&tmp.0).1.recipes, vec![data.recipes[1].clone()]);
+    }
+
+    #[test]
+    fn the_old_single_file_stays_until_migrated() {
+        let tmp = TempDir::new();
+        let data = sample();
+        write(&tmp.0.join(LEGACY_FILE), &data);
+        let path = recipe_path(&tmp.0.join("recipes"), data.recipes[0].id);
+        std::fs::create_dir_all(&path).unwrap();
+
+        let (_, migrated) = Library::open(&tmp.0);
+        assert_eq!(migrated, data, "read from the old file all the same");
+        assert!(tmp.0.join(LEGACY_FILE).exists(), "kept for the next try");
+        assert!(!tmp.0.join("data.json.migrated").exists());
+
+        std::fs::remove_dir(&path).unwrap();
+        assert_eq!(Library::open(&tmp.0).1, data);
+        assert!(tmp.0.join("data.json.migrated").exists());
+        assert_eq!(Library::open(&tmp.0).1, data);
     }
 
     #[test]
