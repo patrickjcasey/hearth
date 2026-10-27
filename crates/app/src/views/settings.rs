@@ -16,7 +16,7 @@ pub fn Settings() -> Element {
             h2 { "Usage statistics" }
             p { class: "meta",
                 "Help improve Hestia by counting how often features are used, such as imports "
-                "and cook mode. Counts never include recipes, links, or anything you type."
+                "and keeping the screen on. Counts never include recipes, links, or anything you type."
             }
             Toggle {
                 label: "Collect usage statistics",

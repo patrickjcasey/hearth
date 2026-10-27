@@ -1,4 +1,4 @@
-//! Keeps the display awake while cook mode is open.
+//! Keeps the display awake while "Keep screen on" is switched on for a recipe.
 
 /// Stop (`true`) or allow (`false`) the screen from dimming and locking.
 /// Must be called on the main thread, which is where Dioxus runs components.

@@ -1,6 +1,6 @@
 # Hestia
 
-A free recipe box written in Rust from end to end. You can save recipes from any website or write your own, scale servings, cook step by step with the screen kept awake, and build a grocery list. It runs on macOS and iOS from a single codebase, and Android support is possible later.
+A free recipe box written in Rust from end to end. You can save recipes from any website or write your own, scale servings, keep the screen on while you cook, and build a grocery list. It runs on macOS and iOS from a single codebase, and Android support is possible later.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ crates/
   app/     hestia-app: Dioxus UI, one codebase for macOS, iOS, (Android)
            - Local-first: data lives in a JSON file on the device
            - Imports recipes directly from the device; no server required
-           - Cook mode keeps the screen awake (see src/wake.rs):
+           - "Keep screen on" on a recipe stops the display sleeping (see src/wake.rs):
              iOS idleTimerDisabled, macOS NSProcessInfo activity,
              Android TODO
            - Opt-in usage statistics (src/analytics.rs), see below
@@ -31,7 +31,7 @@ The library is a folder with one file per recipe (`recipes/<id>.json`) plus `gro
 
 Settings has two switches, and both are off by default:
 
-- **Collect usage statistics** counts events such as app launches, imports and cook-mode sessions on the device. Turning it off deletes the counters and the anonymous install id. Turning it back on creates a new id.
+- **Collect usage statistics** counts events such as app launches, imports and times "Keep screen on" was switched on on the device. Turning it off deletes the counters and the anonymous install id. Turning it back on creates a new id.
 - **Send statistics to Hestia** is only available while collecting. It uploads the counters at most once a day and deletes the sent counts once the upload is accepted.
 
 The Settings screen shows the exact JSON that would be sent. The schema is `hestia_core::UsageReport`, which contains an install id, the app version, the platform, and counts per event. The server rejects any unknown fields or events. These settings are stored in `usage.json` in the local app folder, separate from recipe data, and are never synced.

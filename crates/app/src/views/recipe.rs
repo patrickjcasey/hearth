@@ -3,7 +3,7 @@ use hestia_core::{Event, GroceryItem};
 use uuid::Uuid;
 
 use crate::photos::use_photo;
-use crate::{Route, use_data, use_usage};
+use crate::{Route, use_data, use_usage, wake};
 
 #[component]
 pub fn RecipeDetail(id: Uuid) -> Element {
@@ -15,6 +15,9 @@ pub fn RecipeDetail(id: Uuid) -> Element {
     let image_url = data.read().recipe(id).and_then(|r| r.image_url.clone());
     let hero = use_photo(id, image_url.as_deref()).or(image_url);
     let mut hero_broken = use_signal(|| None::<String>);
+    // "Keep screen on" lasts until it's switched off or the recipe is closed.
+    let mut awake = use_signal(|| false);
+    use_drop(|| wake::keep_awake(false));
 
     let data_ref = data.read();
     let Some(recipe) = data_ref.recipe(id) else {
@@ -41,6 +44,14 @@ pub fn RecipeDetail(id: Uuid) -> Element {
             usage.write().record(Event::GroceriesAdded);
         }
     };
+    let set_awake = move |e: FormEvent| {
+        let on = e.checked();
+        awake.set(on);
+        wake::keep_awake(on);
+        if on {
+            usage.write().record(Event::CookStarted);
+        }
+    };
     let delete = move |_| {
         data.write().recipes.retain(|r| r.id != id);
         navigator().replace(Route::Home {});
@@ -62,12 +73,9 @@ pub fn RecipeDetail(id: Uuid) -> Element {
                 p { class: "description", "{d}" }
             }
             div { class: "actions",
-                if !recipe.steps.is_empty() {
-                    Link {
-                        to: Route::CookMode { id, servings: if base_servings.is_some() { servings() } else { 0 } },
-                        class: "button primary",
-                        "Start cooking"
-                    }
+                label { class: "awake",
+                    input { r#type: "checkbox", role: "switch", class: "switch", checked: awake(), onchange: set_awake }
+                    "Keep screen on"
                 }
                 Link { to: Route::EditRecipe { id }, class: "button", "Edit" }
                 button { onclick: toggle_favorite,

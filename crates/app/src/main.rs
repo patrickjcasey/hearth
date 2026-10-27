@@ -16,7 +16,7 @@ use uuid::Uuid;
 use analytics::Usage;
 use hestia_core::Event;
 use store::{AppData, Library};
-use views::{CookMode, EditRecipe, Groceries, Home, NewRecipe, RecipeDetail, Settings};
+use views::{EditRecipe, Groceries, Home, NewRecipe, RecipeDetail, Settings};
 
 const CSS: &str = include_str!("../assets/main.css");
 
@@ -36,10 +36,6 @@ enum Route {
         Groceries {},
         #[route("/settings")]
         Settings {},
-    #[end_layout]
-    // Full screen, without the tab bar.
-    #[route("/recipe/:id/cook?:servings")]
-    CookMode { id: Uuid, servings: u32 },
 }
 
 fn main() {
@@ -153,13 +149,9 @@ mod tests {
             Route::RecipeDetail { id },
             Route::EditRecipe { id },
             Route::Settings {},
-            Route::CookMode { id, servings: 6 },
         ] {
             let url = route.to_string();
             assert_eq!(url.parse::<Route>().ok(), Some(route), "{url}");
         }
-        // Cook mode opened without a scaler value falls back to "as written".
-        let bare: Route = format!("/recipe/{id}/cook").parse().unwrap();
-        assert_eq!(bare, Route::CookMode { id, servings: 0 });
     }
 }

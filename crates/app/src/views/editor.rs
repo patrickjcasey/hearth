@@ -26,7 +26,7 @@ fn RecipeEditor(id: Option<Uuid>) -> Element {
     if missing {
         return rsx! {
             p { class: "empty", "This recipe no longer exists." }
-            Link { to: Route::Home {}, "Back to recipes" }
+            Link { to: Route::Home {}, class: "button", "Back to recipes" }
         };
     }
 
