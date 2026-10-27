@@ -11,23 +11,40 @@ use crate::model::Recipe;
 pub enum ImportError {
     #[error("no recipe data found on this page")]
     NotFound,
+    #[error("page is too complex to import")]
+    TooComplex,
     #[cfg(feature = "fetch")]
     #[error("could not fetch page: {0}")]
     Fetch(#[from] crate::fetch::FetchError),
+    #[cfg(feature = "fetch")]
+    #[error("import was interrupted")]
+    Interrupted,
 }
 
 /// Recipe pages are rarely over 1 MB; refuse anything far larger.
 #[cfg(feature = "fetch")]
-const MAX_PAGE_BYTES: u64 = 5_000_000;
+const MAX_PAGE_BYTES: u64 = 2_000_000;
 
-/// Downloads `url` and extracts the recipe from it.
+/// More `<` than any real recipe page has. The HTML parser slows down
+/// quadratically on deeply nested unclosed tags (200k `<div>` never finishes),
+/// so a page or text field with more tags than this is refused unparsed.
+const MAX_TAGS: usize = 20_000;
+
+/// Downloads `url` and extracts the recipe from it. Parsing runs on a
+/// blocking thread so the caller's UI stays responsive.
 #[cfg(feature = "fetch")]
 pub async fn fetch_recipe(url: &str) -> Result<Recipe, ImportError> {
     let html = crate::fetch::get(url, MAX_PAGE_BYTES).await?;
-    parse_recipe_html(&String::from_utf8_lossy(&html), Some(url))
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || parse_recipe_html(&String::from_utf8_lossy(&html), Some(&url)))
+        .await
+        .unwrap_or(Err(ImportError::Interrupted))
 }
 
 pub fn parse_recipe_html(html: &str, source_url: Option<&str>) -> Result<Recipe, ImportError> {
+    if html.matches('<').count() > MAX_TAGS {
+        return Err(ImportError::TooComplex);
+    }
     let doc = Html::parse_document(html);
     let selector = Selector::parse(r#"script[type="application/ld+json"]"#).expect("valid selector");
     let node = doc
@@ -35,6 +52,11 @@ pub fn parse_recipe_html(html: &str, source_url: Option<&str>) -> Result<Recipe,
         .filter_map(|el| parse_json_ld(&el.text().collect::<String>()))
         .find_map(|v| find_recipe_node(&v).cloned())
         .ok_or(ImportError::NotFound)?;
+    // Text fields are parsed as HTML too, and JSON can hide tags from the
+    // page-level count as `\u003c` or `&lt;`.
+    if has_complex_text(&node) {
+        return Err(ImportError::TooComplex);
+    }
 
     let mut recipe = recipe_from_json_ld(&node);
     recipe.source_url = source_url.map(str::to_string);
@@ -65,6 +87,16 @@ fn parse_json_ld(s: &str) -> Option<Value> {
         }
         serde_json::from_str(&fixed).ok()
     })
+}
+
+/// Does any string in `v` hold more than [`MAX_TAGS`] tags once decoded?
+fn has_complex_text(v: &Value) -> bool {
+    match v {
+        Value::String(s) => html_escape::decode_html_entities(s).matches('<').count() > MAX_TAGS,
+        Value::Array(items) => items.iter().any(has_complex_text),
+        Value::Object(obj) => obj.values().any(has_complex_text),
+        _ => false,
+    }
 }
 
 /// Searches a JSON-LD value (object, array, `@graph` or `mainEntity`) for a
@@ -298,6 +330,32 @@ mod tests {
         assert_eq!(r.steps, vec!["Boil the pasta.", "Stir in cheese."]);
         assert_eq!(r.tags, vec!["Dinner", "pasta", "comfort food"]);
         assert_eq!(r.source_url.as_deref(), Some("https://example.com/mac"));
+    }
+
+    #[test]
+    fn refuses_pages_with_too_many_tags() {
+        let script = r#"<script type="application/ld+json">{"@type":"Recipe","name":"x"}</script>"#;
+        let nested = format!("<html><body>{}{script}</body></html>", "<div>".repeat(30_000));
+        let start = std::time::Instant::now();
+        let err = parse_recipe_html(&nested, None).unwrap_err();
+        assert!(matches!(err, ImportError::TooComplex), "{err}");
+        assert_eq!(err.to_string(), "page is too complex to import");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
+
+        // Tags hidden inside a JSON-LD text field, as JSON or HTML escapes.
+        for field in ["\\u003cdiv\\u003e", "&lt;div&gt;"] {
+            let page = format!(
+                r#"<script type="application/ld+json">{{"@type":"Recipe","name":"x","description":"{}"}}</script>"#,
+                field.repeat(30_000)
+            );
+            let start = std::time::Instant::now();
+            assert!(matches!(parse_recipe_html(&page, None), Err(ImportError::TooComplex)), "{field}");
+            assert!(start.elapsed() < std::time::Duration::from_secs(1), "{:?}", start.elapsed());
+        }
+
+        // A long but ordinary page still imports.
+        let normal = format!("<html><body>{}{script}</body></html>", "<p>hi</p>".repeat(2_500));
+        assert_eq!(parse_recipe_html(&normal, None).unwrap().title, "x");
     }
 
     #[test]
