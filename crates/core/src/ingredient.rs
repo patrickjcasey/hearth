@@ -110,7 +110,7 @@ fn take_number(s: &str) -> Option<(f64, bool, &str)> {
     let value = match tok.split_once('/') {
         Some((n, d)) => {
             let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
-            (d != 0.0).then(|| n / d)?
+            (d != 0.0).then(|| n / d).filter(|v| v.is_finite())?
         }
         None => tok.parse().ok().filter(|v: &f64| v.is_finite())?,
     };
@@ -123,6 +123,7 @@ fn take_mixed(s: &str) -> Option<(f64, &str)> {
     if !is_frac
         && rest.starts_with(char::is_whitespace)
         && let Some((frac, true, rest)) = take_number(rest)
+        && (whole + frac).is_finite()
     {
         return Some((whole + frac, rest));
     }
@@ -308,5 +309,25 @@ mod tests {
         assert_eq!((i.unit.as_deref(), i.name.as_str()), (Some("kg"), "potatoes"));
         assert_eq!(Ingredient::parse("0,25 l cream").quantity, q(0.25));
         assert_eq!(Ingredient::parse("2, 3 eggs").quantity, q(2.0));
+    }
+
+    /// An infinite amount would serialize as JSON `null`, which can't be read
+    /// back, so the whole recipe file would be unreadable.
+    #[test]
+    fn amounts_are_always_finite() {
+        let huge = "1".repeat(309);
+        for line in [
+            format!("{huge}/0.001 cups flour"),
+            format!("{huge} cups flour"),
+            format!("1 {huge}/0.001 cups flour"),
+            format!("{huge}0 {huge}0/1 cups flour"),
+        ] {
+            let i = Ingredient::parse(&line);
+            assert!(i.quantity.is_none_or(|q| q.amount.is_finite()), "{line:.40}: {:?}", i.quantity);
+            let json = serde_json::to_string(&i).unwrap();
+            assert_eq!(serde_json::from_str::<Ingredient>(&json).unwrap(), i);
+        }
+        // A whole number that fits, plus a fraction, still works.
+        assert_eq!(Ingredient::parse("1 1/2 cups").quantity, q(1.5));
     }
 }

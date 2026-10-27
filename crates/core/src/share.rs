@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::model::Recipe;
+use crate::url::is_web_url;
 
 /// What the app uploads to create a link. The server rejects unknown fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -185,11 +186,6 @@ impl SharedRecipe {
             (None, y) => y.clone(),
         }
     }
-}
-
-fn is_web_url(u: &str) -> bool {
-    let lower = u.trim().to_ascii_lowercase();
-    lower.starts_with("https://") || lower.starts_with("http://")
 }
 
 #[cfg(test)]

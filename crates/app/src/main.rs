@@ -57,9 +57,18 @@ fn App() -> Element {
     });
     let data = use_context_provider(|| Signal::new(data));
     use_context_provider(|| library.clone());
-    // Persist whenever the library changes.
+    // Persist whenever the library changes. A write that fails stays
+    // pending and is shown in the shell until a later save gets through.
+    let mut save_error = use_context_provider(|| Signal::new(None::<String>));
     let saver = library.clone();
-    use_effect(move || saver.borrow_mut().save(&data.read()));
+    use_effect(move || {
+        let mut library = saver.borrow_mut();
+        library.save(&data.read());
+        let error = library.last_error().map(str::to_owned);
+        if *save_error.peek() != error {
+            save_error.set(error);
+        }
+    });
     photos::use_photo_cache(library, data);
 
     let mut usage = use_context_provider(|| Signal::new(store::read_json::<Usage>(analytics::FILE)));
@@ -79,6 +88,7 @@ fn App() -> Element {
 
 #[component]
 fn Shell() -> Element {
+    let save_error = use_save_error();
     rsx! {
         div { class: "shell",
             nav { class: "sidebar",
@@ -87,7 +97,14 @@ fn Shell() -> Element {
                 Link { to: Route::Groceries {}, class: "nav-link", active_class: "active", BasketIcon {} "Groceries" }
                 Link { to: Route::Settings {}, class: "nav-link", active_class: "active", GearIcon {} "Settings" }
             }
-            main { class: "content", Outlet::<Route> {} }
+            main { class: "content",
+                if let Some(error) = save_error() {
+                    p { class: "save-error", role: "alert",
+                        "Couldn't save changes: {error}. Free up space and try again."
+                    }
+                }
+                Outlet::<Route> {}
+            }
         }
     }
 }
@@ -145,6 +162,11 @@ pub fn use_usage() -> Signal<Usage> {
 }
 
 pub fn use_library() -> Rc<RefCell<Library>> {
+    use_context()
+}
+
+/// Why the last save couldn't write everything, while that is so.
+fn use_save_error() -> Signal<Option<String>> {
     use_context()
 }
 

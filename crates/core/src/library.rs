@@ -14,8 +14,10 @@ use uuid::Uuid;
 
 use crate::model::Recipe;
 
-/// Marks a recipe as deleted.
+/// Marks a recipe as deleted. Unknown fields are refused so a recipe that
+/// happens to carry a `deleted_at` key can't be mistaken for one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tombstone {
     pub id: Uuid,
     pub deleted_at: DateTime<Utc>,
@@ -167,6 +169,28 @@ mod tests {
             let json = serde_json::to_string(&entry).unwrap();
             assert_eq!(serde_json::from_str::<Entry>(&json).unwrap(), entry);
         }
+    }
+
+    #[test]
+    fn a_recipe_with_a_deleted_at_key_is_not_a_tombstone() {
+        let recipe = Recipe::new("Bread");
+        let mut json = serde_json::to_value(&recipe).unwrap();
+        json["deleted_at"] = serde_json::json!("2026-01-01T00:00:00Z");
+        let entry: Entry = serde_json::from_value(json).unwrap();
+        assert_eq!(entry, Entry::Recipe(recipe.clone()), "the extra key is ignored");
+
+        // Too little for a recipe, too much for a tombstone: an error, never a delete.
+        let json = serde_json::json!({
+            "id": recipe.id, "deleted_at": "2026-01-01T00:00:00Z", "title": "Bread"
+        });
+        match serde_json::from_value::<Entry>(json) {
+            Ok(Entry::Deleted(_)) => panic!("read as a tombstone"),
+            Ok(Entry::Recipe(_)) | Err(_) => {}
+        }
+
+        let plain = tombstone(&recipe, 1);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert_eq!(serde_json::from_str::<Entry>(&json).unwrap(), plain);
     }
 
     #[test]

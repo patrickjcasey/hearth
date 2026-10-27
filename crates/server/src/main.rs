@@ -11,7 +11,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Loopback by default; put a TLS-terminating reverse proxy in front in production.
     let addr = std::env::var("HESTIA_ADDR").unwrap_or_else(|_| "127.0.0.1:8000".into());
     // The origin people reach the site at, used to build share links.
-    let public_url = std::env::var("HESTIA_PUBLIC_URL").unwrap_or_else(|_| format!("http://{addr}"));
+    let public_url = std::env::var("HESTIA_PUBLIC_URL").unwrap_or_else(|_| {
+        tracing::warn!("HESTIA_PUBLIC_URL is not set; share links will point at http://{addr}");
+        format!("http://{addr}")
+    });
 
     let db = connect(&db_url).await?;
 

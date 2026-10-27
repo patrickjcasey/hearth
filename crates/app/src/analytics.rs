@@ -20,6 +20,10 @@ pub const FILE: &str = "usage.json";
 /// `HESTIA_EVENTS_URL=https://example.com/api/events dx bundle ...`;
 /// builds without it never send anything.
 pub const EVENTS_URL: Option<&str> = option_env!("HESTIA_EVENTS_URL");
+const _: () = assert!(
+    hestia_core::url::is_build_endpoint(EVENTS_URL),
+    "HESTIA_EVENTS_URL must start with https:// (http://127.0.0.1 or http://localhost for local testing)"
+);
 
 const REPORT_EVERY: chrono::Duration = chrono::Duration::days(1);
 

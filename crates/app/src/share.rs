@@ -13,6 +13,10 @@ use hestia_core::{ShareLink, SharedRecipe};
 /// `HESTIA_SHARE_URL=https://example.com/api/share dx bundle ...`;
 /// builds without it have no Share button.
 pub const SHARE_URL: Option<&str> = option_env!("HESTIA_SHARE_URL");
+const _: () = assert!(
+    hestia_core::url::is_build_endpoint(SHARE_URL),
+    "HESTIA_SHARE_URL must start with https:// (http://127.0.0.1 or http://localhost for local testing)"
+);
 
 /// The server's host name, to tell the user where the recipe is going.
 pub fn host() -> Option<&'static str> {

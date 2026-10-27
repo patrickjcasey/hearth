@@ -231,7 +231,6 @@ async fn show_share(State(s): State<AppState>, Path(id): Path<String>) -> Result
             .bind(db_time(Utc::now()))
             .fetch_optional(&s.db)
             .await?;
-    let noindex = [(header::HeaderName::from_static("x-robots-tag"), "noindex")];
     let found = row.and_then(|(json, expires)| {
         Some((serde_json::from_str::<SharedRecipe>(&json).ok()?, DateTime::parse_from_rfc3339(&expires).ok()?))
     });
@@ -241,13 +240,25 @@ async fn show_share(State(s): State<AppState>, Path(id): Path<String>) -> Result
              <p>Shared recipes are kept for {} days. Ask whoever sent it to share it again.</p></article>",
             SHARE_LIFETIME.num_days()
         );
-        return Ok((StatusCode::NOT_FOUND, noindex, Html(layout("Link expired · Hestia", "", &body)))
+        return Ok((StatusCode::NOT_FOUND, SHARE_HEADERS, Html(layout("Link expired · Hestia", "", &body)))
             .into_response());
     };
     let title = format!("{} · Hestia", esc(&recipe.title));
     let html = layout(&title, &share_head(&recipe), &share_body(&recipe, expires_at.with_timezone(&Utc)));
-    Ok((noindex, Html(html)).into_response())
+    Ok((SHARE_HEADERS, Html(html)).into_response())
 }
+
+/// Shared pages show text that strangers wrote. Everything is escaped, but
+/// should an escape ever be missed, the browser is told to run no script and
+/// load nothing but the site's stylesheet and the recipe photo. The JSON-LD
+/// `<script>` is data, which CSP does not block. Pages also stay out of search
+/// and send no referrer to the photo's host.
+const SHARE_HEADERS: [(header::HeaderName, &str); 4] = [
+    (header::CONTENT_SECURITY_POLICY, "default-src 'none'; img-src https: http:; style-src 'self'"),
+    (header::REFERRER_POLICY, "no-referrer"),
+    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    (header::HeaderName::from_static("x-robots-tag"), "noindex"),
+];
 
 /// Link-preview tags for messaging apps, and a hint to keep shares out of search.
 fn share_head(r: &SharedRecipe) -> String {
@@ -284,7 +295,7 @@ fn share_body(r: &SharedRecipe, expires_at: DateTime<Utc>) -> String {
         b += &format!("<p class=\"meta\">{}</p>\n", meta.join(" · "));
     }
     if let Some(img) = &r.image_url {
-        b += &format!("<img class=\"photo\" src=\"{}\" alt=\"\">\n", esc(img));
+        b += &format!("<img class=\"photo\" src=\"{}\" alt=\"\" referrerpolicy=\"no-referrer\">\n", esc(img));
     }
     if let Some(d) = &r.description {
         b += &format!("<p>{}</p>\n", esc(d));
@@ -337,7 +348,7 @@ mod tests {
 
     use super::*;
     use axum::body::Body;
-    use axum::http::Request;
+    use axum::http::{HeaderMap, Request};
     use hestia_core::{Event, Ingredient, Recipe, parse_recipe_html};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -374,10 +385,23 @@ mod tests {
     }
 
     async fn get_text(app: &Router, path: &str) -> (StatusCode, String) {
+        let (status, _, body) = get_full(app, path).await;
+        (status, body)
+    }
+
+    async fn get_full(app: &Router, path: &str) -> (StatusCode, HeaderMap, String) {
         let res = app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap()).await.unwrap();
-        let status = res.status();
-        let body = res.into_body().collect().await.unwrap().to_bytes();
-        (status, String::from_utf8(body.to_vec()).unwrap())
+        let (parts, body) = res.into_parts();
+        let body = body.collect().await.unwrap().to_bytes();
+        (parts.status, parts.headers, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    fn assert_share_headers(headers: &HeaderMap) {
+        let get = |name: &str| headers.get(name).map(|v| v.to_str().unwrap().to_string());
+        assert_eq!(get("content-security-policy").as_deref(), Some("default-src 'none'; img-src https: http:; style-src 'self'"));
+        assert_eq!(get("referrer-policy").as_deref(), Some("no-referrer"));
+        assert_eq!(get("x-content-type-options").as_deref(), Some("nosniff"));
+        assert_eq!(get("x-robots-tag").as_deref(), Some("noindex"));
     }
 
     #[tokio::test]
@@ -475,6 +499,7 @@ mod tests {
         r.description = Some("Comforting <and> quick.".into());
         r.author = Some("Priya".into());
         r.source_url = Some("https://example.com/dal".into());
+        r.image_url = Some("https://example.com/dal.jpg".into());
         r.servings = Some(4);
         r.prep_minutes = Some(10);
         r.cook_minutes = Some(30);
@@ -502,8 +527,13 @@ mod tests {
         assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
         assert!(link.expires_at > Utc::now() + SHARE_LIFETIME - Duration::minutes(1));
 
-        let (status, html) = get_text(&app, &format!("/r/{id}")).await;
+        let (status, headers, html) = get_full(&app, &format!("/r/{id}")).await;
         assert_eq!(status, StatusCode::OK);
+        assert_share_headers(&headers);
+        assert!(html.contains(r#"<img class="photo" src="https://example.com/dal.jpg" alt="" referrerpolicy="no-referrer">"#));
+        // Nothing the CSP would block: no inline styles, no scripts besides the JSON-LD data.
+        assert!(!html.contains("style=") && !html.contains("<style"));
+        assert_eq!(html.matches("<script").count(), 1);
         assert!(html.contains("<h1>Weeknight Dal</h1>"));
         assert!(html.contains("Comforting &lt;and&gt; quick."), "text is escaped");
         assert!(html.contains("<li>2 1/2 cups water</li>"));
@@ -551,8 +581,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (status, html) = get_text(&app, "/r/old").await;
+        let (status, headers, html) = get_full(&app, "/r/old").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_share_headers(&headers);
         assert!(html.contains("expired"));
         assert_eq!(get_text(&app, "/r/nope").await.0, StatusCode::NOT_FOUND);
 

@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -59,8 +59,11 @@ impl Recipe {
         }
     }
 
+    /// Mark the recipe as changed now. Never earlier than the version being
+    /// edited (a skewed clock, a file stamped in the future), or the edit
+    /// would lose the merge to what it replaced.
     pub fn touch(&mut self) {
-        self.updated_at = Utc::now();
+        self.updated_at = Utc::now().max(self.updated_at + TimeDelta::nanoseconds(1));
     }
 
     /// Add a dated note to the cooking log. Blank text is ignored; returns
@@ -181,6 +184,20 @@ mod tests {
         assert!(r.remove_note(id));
         assert!(!r.remove_note(id));
         assert!(r.cooking_log.is_empty());
+    }
+
+    #[test]
+    fn touch_never_moves_updated_at_backwards() {
+        let mut r = Recipe::new("Bread");
+        let future = Utc::now() + TimeDelta::days(1);
+        r.updated_at = future;
+        r.touch();
+        assert!(r.updated_at > future, "an edit must beat the version it replaces");
+
+        let before = Utc::now();
+        let mut r = Recipe::new("Bread");
+        r.touch();
+        assert!(r.updated_at >= before && r.updated_at < future, "normally just now");
     }
 
     #[test]

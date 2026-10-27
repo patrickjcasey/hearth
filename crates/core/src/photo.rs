@@ -24,6 +24,9 @@ pub enum PhotoError {
     Fetch(#[from] crate::fetch::FetchError),
     #[error("not an image we can read: {0}")]
     Decode(#[from] image::ImageError),
+    #[cfg(feature = "fetch")]
+    #[error("not a public web link")]
+    NotPublic,
 }
 
 /// File stem for a recipe's stored photo, such as `<id>-9f2a…`. The hash of
@@ -45,9 +48,13 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, b| (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
 }
 
-/// Downloads the photo at `url`.
+/// Downloads the photo at `url`. Refuses links that aren't to a public web
+/// host, so a recipe file can't make the device probe its own network.
 #[cfg(feature = "fetch")]
 pub async fn fetch_photo(url: &str) -> Result<Vec<u8>, PhotoError> {
+    if !crate::url::is_public_web_url(url) {
+        return Err(PhotoError::NotPublic);
+    }
     Ok(crate::fetch::get(url, MAX_PHOTO_BYTES).await?)
 }
 
@@ -96,6 +103,19 @@ mod tests {
             .write_to(&mut out, image::ImageFormat::Png)
             .unwrap();
         out.into_inner()
+    }
+
+    #[cfg(feature = "fetch")]
+    #[tokio::test]
+    async fn never_fetches_private_hosts() {
+        // A listener that must not be contacted: the check happens first.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}/photo.jpg", listener.local_addr().unwrap());
+        for bad in [url.as_str(), "http://localhost/x.jpg", "http://nas.local/x.jpg", "file:///etc/hosts"] {
+            assert!(matches!(fetch_photo(bad).await, Err(PhotoError::NotPublic)), "{bad}");
+        }
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     }
 
     fn size(jpeg: &[u8]) -> (u32, u32) {

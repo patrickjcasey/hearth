@@ -10,6 +10,7 @@ pub mod model;
 #[cfg(feature = "photos")]
 pub mod photo;
 pub mod share;
+pub mod url;
 pub mod usage;
 
 pub use draft::RecipeDraft;
