@@ -4,3 +4,9 @@ name = "Hestia"
 [bundle]
 identifier = "app.hestia.recipes"
 publisher = "Hestia"
+
+# Extra Info.plist keys for the iOS app: exports land in the app's Documents
+# folder, and these make it show up in the Files app.
+[ios.plist]
+UIFileSharingEnabled = true
+LSSupportsOpeningDocumentsInPlace = true

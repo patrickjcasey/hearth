@@ -23,6 +23,7 @@ pub fn RecipeDetail(id: Uuid) -> Element {
     use_drop(|| wake::keep_awake(false));
     let mut note_text = use_signal(String::new);
     let mut share_open = use_signal(|| false);
+    let mut confirm_delete = use_signal(|| false);
 
     let data_ref = data.read();
     let Some(recipe) = data_ref.recipe(id) else {
@@ -185,7 +186,16 @@ pub fn RecipeDetail(id: Uuid) -> Element {
                     }
                 }
             }
-            button { class: "danger", onclick: delete, "Delete recipe" }
+            // Deleting is final (the tombstone spreads to every device), so
+            // it takes two taps.
+            div { class: "actions delete",
+                if confirm_delete() {
+                    button { class: "danger", onclick: delete, "Delete for good?" }
+                    button { class: "quiet", onclick: move |_| confirm_delete.set(false), "Cancel" }
+                } else {
+                    button { class: "danger", onclick: move |_| confirm_delete.set(true), "Delete recipe" }
+                }
+            }
         }
     }
 }

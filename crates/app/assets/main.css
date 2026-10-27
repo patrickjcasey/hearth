@@ -164,6 +164,11 @@ button:disabled { opacity: 0.5; cursor: default; transform: none; }
 button.quiet { background: none; color: var(--muted); }
 button.danger { color: var(--danger); background: none; }
 .error { color: var(--danger); }
+.save-error {
+  margin: 0 0 20px; padding: 10px 14px;
+  border-radius: var(--r-sm); background: var(--danger-tint); color: var(--danger);
+  font-weight: 500;
+}
 .meta { color: var(--muted); font-size: 0.875rem; }
 .empty {
   padding: 32px 24px; margin: 24px 0;
@@ -280,7 +285,7 @@ button.danger { color: var(--danger); background: none; }
 .tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 28px; }
 .tag { padding: 4px 12px; border-radius: 999px; background: var(--fill); font-size: 0.875rem; }
 .notes { white-space: pre-wrap; max-width: 65ch; }
-.recipe .danger { margin-top: 40px; }
+.recipe .delete { margin-top: 40px; }
 .cooking-log { max-width: 65ch; }
 .cooking-log h2 { margin-bottom: 4px; }
 .log-add { display: flex; gap: 8px; align-items: flex-end; margin: 12px 0 8px; }
